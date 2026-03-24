@@ -85,6 +85,7 @@ class PrisonersDilemmaEnv(gym.Env):
         self._step = 0
         self._last_actions = np.zeros(self.num_agents, dtype=np.int8)
         self._episode_returns = np.zeros(self.num_agents, dtype=np.float32)
+        self._selected_partners = np.arange(self.num_agents, dtype=np.int32)
         self.is_terminated = True
 
     def _normalize_interaction_mode(self, interaction_mode: str) -> str:
@@ -142,13 +143,38 @@ class PrisonersDilemmaEnv(gym.Env):
         vec[int(action_code)] = 1.0
         return vec
 
+    def _sample_partner(self, agent_idx: int) -> int:
+        sampled = int(self._rng.integers(self.num_agents - 1))
+        if sampled >= agent_idx:
+            sampled += 1
+        return sampled
+
+    def _sample_all_partners(self) -> np.ndarray:
+        selected = np.zeros((self.num_agents,), dtype=np.int32)
+        for agent_idx in range(self.num_agents):
+            selected[agent_idx] = self._sample_partner(agent_idx)
+        return selected
+
+    def _build_random_mode_partner_features(self, agent_idx: int) -> tuple[float, float]:
+        partner_idx = int(self._selected_partners[agent_idx])
+        partner_last = int(self._last_actions[partner_idx])
+        if partner_last == 1:
+            return 1.0, 0.0
+        if partner_last == 2:
+            return 0.0, 1.0
+        return 0.0, 0.0
+
     def _build_observations(self) -> list[dict[str, np.ndarray]]:
         progress = np.asarray([self._step / float(self.max_steps)], dtype=np.float32)
         observations: list[dict[str, np.ndarray]] = []
         for agent_idx in range(self.num_agents):
-            other_actions = np.delete(self._last_actions, agent_idx)
-            coop_ratio = float(np.mean(other_actions == 1)) if other_actions.size > 0 else 0.0
-            defect_ratio = float(np.mean(other_actions == 2)) if other_actions.size > 0 else 0.0
+            if self.interaction_mode == "random_partner_with_replacement":
+                coop_ratio, defect_ratio = self._build_random_mode_partner_features(agent_idx)
+            else:
+                other_actions = np.delete(self._last_actions, agent_idx)
+                coop_ratio = float(np.mean(other_actions == 1)) if other_actions.size > 0 else 0.0
+                defect_ratio = float(np.mean(other_actions == 2)) if other_actions.size > 0 else 0.0
+
             ratios = np.asarray([coop_ratio, defect_ratio], dtype=np.float32)
             obs_vec = np.concatenate(
                 [
@@ -165,6 +191,7 @@ class PrisonersDilemmaEnv(gym.Env):
         self._step = 0
         self._last_actions[:] = 0
         self._episode_returns[:] = 0.0
+        self._selected_partners[:] = np.arange(self.num_agents, dtype=np.int32)
         self.is_terminated = False
         for state in self._scripted_by_agent.values():
             state.grudged = False
@@ -174,9 +201,14 @@ class PrisonersDilemmaEnv(gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(int(seed))
         self._reset_state()
+        if self.interaction_mode == "random_partner_with_replacement":
+            self._selected_partners = self._sample_all_partners()
+
         infos = []
         for agent_idx in range(self.num_agents):
             info = {}
+            if self.interaction_mode == "random_partner_with_replacement":
+                info["selected_partner"] = int(self._selected_partners[agent_idx])
             if agent_idx in self._scripted_by_agent:
                 info["scripted_strategy"] = self._scripted_by_agent[agent_idx].name
             infos.append(info)
@@ -235,26 +267,19 @@ class PrisonersDilemmaEnv(gym.Env):
         scores *= scale
         return [np.float32(value) for value in scores]
 
-    def _sample_partner(self, agent_idx: int) -> int:
-        sampled = int(self._rng.integers(self.num_agents - 1))
-        if sampled >= agent_idx:
-            sampled += 1
-        return sampled
-
     def _random_partner_with_replacement_rewards(
         self,
         action_list: list[int],
-    ) -> tuple[list[np.float32], list[int], list[int]]:
+        selected_partners: np.ndarray,
+    ) -> tuple[list[np.float32], list[int]]:
         scores = np.zeros(self.num_agents, dtype=np.float32)
         interaction_counts = np.zeros(self.num_agents, dtype=np.int32)
-        selected_partners = [-1 for _ in range(self.num_agents)]
 
         # Reference: https://arxiv.org/pdf/1902.03185
-        # Adaptation note: this mode implements random (non-learning) partner selection;
-        # each agent chooses one partner per round with replacement, yielding N directed matches.
+        # Adaptation note: selection happens before dilemma in each round; this mode randomizes selection,
+        # then plays N directed dilemma interactions (one per selecting agent).
         for agent_idx in range(self.num_agents):
-            partner_idx = self._sample_partner(agent_idx)
-            selected_partners[agent_idx] = partner_idx
+            partner_idx = int(selected_partners[agent_idx])
             pair = (self._action_lookup[action_list[agent_idx]], self._action_lookup[action_list[partner_idx]])
             reward_i, reward_j = self.game.score(pair)
             scores[agent_idx] += float(reward_i)
@@ -267,7 +292,7 @@ class PrisonersDilemmaEnv(gym.Env):
             scores[active] = scores[active] / interaction_counts[active]
 
         rewards = [np.float32(value) for value in scores]
-        return rewards, selected_partners, interaction_counts.astype(np.int32).tolist()
+        return rewards, interaction_counts.astype(np.int32).tolist()
 
     def step(self, actions: Iterable[int]):
         if self.is_terminated:
@@ -278,16 +303,20 @@ class PrisonersDilemmaEnv(gym.Env):
         action_list = self._validate_actions(actions)
         action_list = self._apply_scripted_actions(action_list)
 
-        selected_partners: list[int] | None = None
         interaction_counts: list[int] | None = None
+        played_partners: np.ndarray | None = None
         if self.interaction_mode == "all_pairs_average":
             rewards = self._pairwise_average_rewards(action_list)
         else:
-            rewards, selected_partners, interaction_counts = self._random_partner_with_replacement_rewards(action_list)
+            played_partners = self._selected_partners.copy()
+            rewards, interaction_counts = self._random_partner_with_replacement_rewards(action_list, played_partners)
 
         self._step += 1
         self._last_actions[:] = np.asarray(action_list, dtype=np.int8) + 1
         self._episode_returns += np.asarray(rewards, dtype=np.float32)
+
+        if self.interaction_mode == "random_partner_with_replacement":
+            self._selected_partners = self._sample_all_partners()
 
         terminated = self._step >= self.max_steps
         self.is_terminated = terminated
@@ -300,9 +329,11 @@ class PrisonersDilemmaEnv(gym.Env):
             for agent_idx in range(self.num_agents)
         ]
 
-        if selected_partners is not None and interaction_counts is not None:
+        if self.interaction_mode == "random_partner_with_replacement" and interaction_counts is not None:
+            assert played_partners is not None
             for agent_idx in range(self.num_agents):
-                infos[agent_idx]["selected_partner"] = int(selected_partners[agent_idx])
+                infos[agent_idx]["played_partner"] = int(played_partners[agent_idx])
+                infos[agent_idx]["selected_partner"] = int(self._selected_partners[agent_idx])
                 infos[agent_idx]["interaction_count"] = int(interaction_counts[agent_idx])
 
         for agent_idx, state in self._scripted_by_agent.items():
