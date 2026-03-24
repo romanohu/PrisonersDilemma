@@ -68,3 +68,19 @@ For full details (observation layout, reward semantics, scripted policies, post-
 - Gymnasium Env API: https://gymnasium.farama.org/main/api/env/
 - Sample Factory custom environment integration: https://www.samplefactory.dev/03-customization/custom-environments/
 - Axelrod documentation: https://axelrod.readthedocs.io/en/stable/index.html
+
+## Random Partner Baseline Mode
+
+To emulate random partner selection without learning partner-choice policies, use:
+
+```python
+env = PrisonersDilemmaEnv(
+    num_agents=20,
+    max_steps=20,
+    interaction_mode="random_partner_with_replacement",
+    reward_aggregation="sum",
+)
+```
+
+In this mode, each agent samples one partner `j != i` uniformly each round (with replacement),
+which yields `num_agents` directed interactions per step.

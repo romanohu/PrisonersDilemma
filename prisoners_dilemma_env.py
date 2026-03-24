@@ -30,6 +30,8 @@ class PrisonersDilemmaEnv(gym.Env):
         payoff_matrix: Sequence[Sequence[float]] = ((3.0, 0.0), (5.0, 1.0)),
         scripted_opponents: Sequence[str | None] | None = None,
         scripted_seed: int = 0,
+        interaction_mode: str = "all_pairs_average",
+        reward_aggregation: str | None = None,
     ):
         if int(num_agents) < 2:
             raise ValueError(f"PrisonersDilemmaEnv requires at least 2 agents, got {num_agents}")
@@ -43,6 +45,9 @@ class PrisonersDilemmaEnv(gym.Env):
         self.num_agents = int(num_agents)
         self.max_steps = int(max_steps)
         self.payoff_matrix = payoff
+
+        self.interaction_mode = self._normalize_interaction_mode(interaction_mode)
+        self.reward_aggregation = self._normalize_reward_aggregation(reward_aggregation)
 
         # Reference: https://wrap.warwick.ac.uk/id/eprint/183331/2/WRAP-learning-partner-selection-rules-that-sustain-cooperation-social-dilemmas-with-the-option-of-opting-out-2024.pdf
         # Adaptation note: each pair plays repeated PD with the same (R,S,T,P), then each agent gets pairwise-average reward.
@@ -81,6 +86,25 @@ class PrisonersDilemmaEnv(gym.Env):
         self._last_actions = np.zeros(self.num_agents, dtype=np.int8)
         self._episode_returns = np.zeros(self.num_agents, dtype=np.float32)
         self.is_terminated = True
+
+    def _normalize_interaction_mode(self, interaction_mode: str) -> str:
+        mode = str(interaction_mode).strip().lower()
+        supported = {"all_pairs_average", "random_partner_with_replacement"}
+        if mode not in supported:
+            raise ValueError(f"Unsupported interaction_mode {interaction_mode!r}. Supported: {sorted(supported)}")
+        return mode
+
+    def _normalize_reward_aggregation(self, reward_aggregation: str | None) -> str:
+        if reward_aggregation is None:
+            if self.interaction_mode == "random_partner_with_replacement":
+                return "sum"
+            return "average"
+
+        agg = str(reward_aggregation).strip().lower()
+        supported = {"average", "sum"}
+        if agg not in supported:
+            raise ValueError(f"Unsupported reward_aggregation {reward_aggregation!r}. Supported: {sorted(supported)}")
+        return agg
 
     def _build_scripted_policies(
         self,
@@ -211,6 +235,40 @@ class PrisonersDilemmaEnv(gym.Env):
         scores *= scale
         return [np.float32(value) for value in scores]
 
+    def _sample_partner(self, agent_idx: int) -> int:
+        sampled = int(self._rng.integers(self.num_agents - 1))
+        if sampled >= agent_idx:
+            sampled += 1
+        return sampled
+
+    def _random_partner_with_replacement_rewards(
+        self,
+        action_list: list[int],
+    ) -> tuple[list[np.float32], list[int], list[int]]:
+        scores = np.zeros(self.num_agents, dtype=np.float32)
+        interaction_counts = np.zeros(self.num_agents, dtype=np.int32)
+        selected_partners = [-1 for _ in range(self.num_agents)]
+
+        # Reference: https://arxiv.org/pdf/1902.03185
+        # Adaptation note: this mode implements random (non-learning) partner selection;
+        # each agent chooses one partner per round with replacement, yielding N directed matches.
+        for agent_idx in range(self.num_agents):
+            partner_idx = self._sample_partner(agent_idx)
+            selected_partners[agent_idx] = partner_idx
+            pair = (self._action_lookup[action_list[agent_idx]], self._action_lookup[action_list[partner_idx]])
+            reward_i, reward_j = self.game.score(pair)
+            scores[agent_idx] += float(reward_i)
+            scores[partner_idx] += float(reward_j)
+            interaction_counts[agent_idx] += 1
+            interaction_counts[partner_idx] += 1
+
+        if self.reward_aggregation == "average":
+            active = interaction_counts > 0
+            scores[active] = scores[active] / interaction_counts[active]
+
+        rewards = [np.float32(value) for value in scores]
+        return rewards, selected_partners, interaction_counts.astype(np.int32).tolist()
+
     def step(self, actions: Iterable[int]):
         if self.is_terminated:
             obs, infos = self.reset()
@@ -219,7 +277,13 @@ class PrisonersDilemmaEnv(gym.Env):
 
         action_list = self._validate_actions(actions)
         action_list = self._apply_scripted_actions(action_list)
-        rewards = self._pairwise_average_rewards(action_list)
+
+        selected_partners: list[int] | None = None
+        interaction_counts: list[int] | None = None
+        if self.interaction_mode == "all_pairs_average":
+            rewards = self._pairwise_average_rewards(action_list)
+        else:
+            rewards, selected_partners, interaction_counts = self._random_partner_with_replacement_rewards(action_list)
 
         self._step += 1
         self._last_actions[:] = np.asarray(action_list, dtype=np.int8) + 1
@@ -235,6 +299,12 @@ class PrisonersDilemmaEnv(gym.Env):
             {"true_objective": np.asarray(self._episode_returns[agent_idx], dtype=np.float32)}
             for agent_idx in range(self.num_agents)
         ]
+
+        if selected_partners is not None and interaction_counts is not None:
+            for agent_idx in range(self.num_agents):
+                infos[agent_idx]["selected_partner"] = int(selected_partners[agent_idx])
+                infos[agent_idx]["interaction_count"] = int(interaction_counts[agent_idx])
+
         for agent_idx, state in self._scripted_by_agent.items():
             infos[agent_idx]["scripted_strategy"] = state.name
             infos[agent_idx]["scripted_action"] = int(action_list[agent_idx])
