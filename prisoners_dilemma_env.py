@@ -32,11 +32,14 @@ class PrisonersDilemmaEnv(gym.Env):
         scripted_seed: int = 0,
         interaction_mode: str = "all_pairs_average",
         reward_aggregation: str | None = None,
+        history_h: int = 1,
     ):
         if int(num_agents) < 2:
             raise ValueError(f"PrisonersDilemmaEnv requires at least 2 agents, got {num_agents}")
         if int(max_steps) <= 0:
             raise ValueError(f"max_steps must be positive, got {max_steps}")
+        if int(history_h) <= 0:
+            raise ValueError(f"history_h must be positive, got {history_h}")
 
         payoff = np.asarray(payoff_matrix, dtype=np.float32)
         if payoff.shape != (2, 2):
@@ -45,6 +48,7 @@ class PrisonersDilemmaEnv(gym.Env):
         self.num_agents = int(num_agents)
         self.max_steps = int(max_steps)
         self.payoff_matrix = payoff
+        self.history_h = int(history_h)
 
         self.interaction_mode = self._normalize_interaction_mode(interaction_mode)
         self.reward_aggregation = self._normalize_reward_aggregation(reward_aggregation)
@@ -66,13 +70,13 @@ class PrisonersDilemmaEnv(gym.Env):
         self._scripted_by_agent = self._build_scripted_policies(scripted_opponents)
 
         # Reference: https://arxiv.org/abs/1902.03185
-        # Adaptation note: memory-one observation with aggregated partner behavior for variable-sized groups.
+        # Adaptation note: dilemma observation includes only partner behavior history with configurable h.
         self.observation_space = spaces.Dict(
             {
                 "obs": spaces.Box(
                     low=0.0,
                     high=1.0,
-                    shape=(6,),
+                    shape=(2 * self.history_h,),
                     dtype=np.float32,
                 )
             }
@@ -84,6 +88,7 @@ class PrisonersDilemmaEnv(gym.Env):
         self._all_false = [False for _ in range(self.num_agents)]
         self._step = 0
         self._last_actions = np.zeros(self.num_agents, dtype=np.int8)
+        self._action_history = np.zeros((self.num_agents, self.history_h), dtype=np.int8)
         self._episode_returns = np.zeros(self.num_agents, dtype=np.float32)
         self._selected_partners = np.arange(self.num_agents, dtype=np.int32)
         self.is_terminated = True
@@ -138,11 +143,6 @@ class PrisonersDilemmaEnv(gym.Env):
             result[agent_idx] = _ScriptedPolicyState(name=name)
         return result
 
-    def _one_hot_last_action(self, action_code: int) -> np.ndarray:
-        vec = np.zeros(3, dtype=np.float32)
-        vec[int(action_code)] = 1.0
-        return vec
-
     def _sample_partner(self, agent_idx: int) -> int:
         sampled = int(self._rng.integers(self.num_agents - 1))
         if sampled >= agent_idx:
@@ -155,41 +155,44 @@ class PrisonersDilemmaEnv(gym.Env):
             selected[agent_idx] = self._sample_partner(agent_idx)
         return selected
 
-    def _build_random_mode_partner_features(self, agent_idx: int) -> tuple[float, float]:
+    def _encode_action_history(self, history_codes: np.ndarray) -> np.ndarray:
+        features = np.zeros((2 * self.history_h,), dtype=np.float32)
+        for lag in range(self.history_h):
+            action_code = int(history_codes[lag])
+            if action_code == 1:
+                features[2 * lag] = 1.0
+            elif action_code == 2:
+                features[2 * lag + 1] = 1.0
+        return features
+
+    def _build_random_mode_partner_features(self, agent_idx: int) -> np.ndarray:
         partner_idx = int(self._selected_partners[agent_idx])
-        partner_last = int(self._last_actions[partner_idx])
-        if partner_last == 1:
-            return 1.0, 0.0
-        if partner_last == 2:
-            return 0.0, 1.0
-        return 0.0, 0.0
+        return self._encode_action_history(self._action_history[partner_idx])
+
+    def _build_all_pairs_history_features(self, agent_idx: int) -> np.ndarray:
+        features = np.zeros((2 * self.history_h,), dtype=np.float32)
+        for lag in range(self.history_h):
+            other_actions = np.delete(self._action_history[:, lag], agent_idx)
+            coop_ratio = float(np.mean(other_actions == 1)) if other_actions.size > 0 else 0.0
+            defect_ratio = float(np.mean(other_actions == 2)) if other_actions.size > 0 else 0.0
+            features[2 * lag] = coop_ratio
+            features[2 * lag + 1] = defect_ratio
+        return features
 
     def _build_observations(self) -> list[dict[str, np.ndarray]]:
-        progress = np.asarray([self._step / float(self.max_steps)], dtype=np.float32)
         observations: list[dict[str, np.ndarray]] = []
         for agent_idx in range(self.num_agents):
             if self.interaction_mode == "random_partner_with_replacement":
-                coop_ratio, defect_ratio = self._build_random_mode_partner_features(agent_idx)
+                obs_vec = self._build_random_mode_partner_features(agent_idx)
             else:
-                other_actions = np.delete(self._last_actions, agent_idx)
-                coop_ratio = float(np.mean(other_actions == 1)) if other_actions.size > 0 else 0.0
-                defect_ratio = float(np.mean(other_actions == 2)) if other_actions.size > 0 else 0.0
-
-            ratios = np.asarray([coop_ratio, defect_ratio], dtype=np.float32)
-            obs_vec = np.concatenate(
-                [
-                    self._one_hot_last_action(int(self._last_actions[agent_idx])),
-                    ratios,
-                    progress,
-                ],
-                axis=0,
-            )
+                obs_vec = self._build_all_pairs_history_features(agent_idx)
             observations.append({"obs": obs_vec.astype(np.float32)})
         return observations
 
     def _reset_state(self) -> None:
         self._step = 0
         self._last_actions[:] = 0
+        self._action_history[:, :] = 0
         self._episode_returns[:] = 0.0
         self._selected_partners[:] = np.arange(self.num_agents, dtype=np.int32)
         self.is_terminated = False
@@ -312,7 +315,11 @@ class PrisonersDilemmaEnv(gym.Env):
             rewards, interaction_counts = self._random_partner_with_replacement_rewards(action_list, played_partners)
 
         self._step += 1
-        self._last_actions[:] = np.asarray(action_list, dtype=np.int8) + 1
+        latest_actions = np.asarray(action_list, dtype=np.int8) + 1
+        self._last_actions[:] = latest_actions
+        if self.history_h > 1:
+            self._action_history[:, 1:] = self._action_history[:, :-1]
+        self._action_history[:, 0] = latest_actions
         self._episode_returns += np.asarray(rewards, dtype=np.float32)
 
         if self.interaction_mode == "random_partner_with_replacement":

@@ -30,7 +30,7 @@ If `axelrod` is installed in your Python environment, it is used directly. Other
 ```python
 from prisoners_dilemma_env import PrisonersDilemmaEnv
 
-env = PrisonersDilemmaEnv(num_agents=2, max_steps=5)
+env = PrisonersDilemmaEnv(num_agents=2, max_steps=5, history_h=1)
 obs, infos = env.reset(seed=7)
 print("reset obs shape:", obs[0]["obs"].shape)
 
@@ -79,8 +79,17 @@ env = PrisonersDilemmaEnv(
     max_steps=20,
     interaction_mode="random_partner_with_replacement",
     reward_aggregation="sum",
+    history_h=1,
 )
 ```
 
 In this mode, each agent samples one partner `j != i` uniformly each round (with replacement),
 which yields `num_agents` directed interactions per step.
+
+## Observation Summary
+
+The environment exposes partner-behavior history only:
+
+- Observation shape is `(2 * history_h,)`
+- For each lag `k`, the pair `[2*k, 2*k+1]` encodes cooperation/defection
+- Default is `history_h=1`, i.e. only the most recent partner behavior

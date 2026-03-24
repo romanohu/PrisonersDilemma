@@ -13,6 +13,7 @@ PrisonersDilemmaEnv(
     scripted_seed: int = 0,
     interaction_mode: str = "all_pairs_average",
     reward_aggregation: str | None = None,
+    history_h: int = 1,
 )
 ```
 
@@ -28,6 +29,7 @@ PrisonersDilemmaEnv(
   - `random_partner_with_replacement`: each round has a random selection stage, then a dilemma stage.
 - `reward_aggregation`: reduction for the selected interaction rule (`sum` or `average`).
   - default is `average` for `all_pairs_average`, `sum` for `random_partner_with_replacement`.
+- `history_h`: observation history window length. Must be `> 0`.
 
 ### Scripted Opponents
 
@@ -50,32 +52,34 @@ Notes:
   - `0`: Cooperate (C)
   - `1`: Defect (D)
 
-- `observation_space = spaces.Dict({"obs": Box(shape=(6,), dtype=float32)})`
+- `observation_space = spaces.Dict({"obs": Box(shape=(2 * history_h,), dtype=float32)})`
 
-Per-agent observation vector layout (`obs`, length 6):
+Per-agent observation vector layout (`obs`, length `2 * history_h`):
 
-1. `obs[0:3]`: one-hot of own previous action state (`none`, `C`, `D`)
-2. `obs[3]`: cooperation feature
-3. `obs[4]`: defection feature
-4. `obs[5]`: normalized episode progress (`current_step / max_steps`)
+For each lag `k` from `0` to `history_h - 1`:
+
+- `obs[2*k]`: cooperation feature at lag `k`
+- `obs[2*k+1]`: defection feature at lag `k`
+
+`k=0` is the most recent interaction history, `k=1` is one step older, and so on.
 
 Feature semantics by mode:
 
-- `all_pairs_average`: `obs[3:5]` is the ratio of opponents that cooperated/defected at the previous step.
-- `random_partner_with_replacement`: `obs[3:5]` is the one-step history of the currently selected partner for the next dilemma round.
+- `all_pairs_average`: each lag pair stores the ratio of opponents that cooperated/defected at that lag.
+- `random_partner_with_replacement`: each lag pair stores one selected partner's action history as one-hot (`[1,0]` for C, `[0,1]` for D, `[0,0]` when history is empty).
 
 ## `reset(seed=None, options=None)`
 
 State transition:
 
 1. Optional re-seed.
-2. Clear step counter, previous actions, episode returns.
+2. Clear step counter, previous actions, action-history buffer, episode returns.
 3. Reset scripted policy internal state.
 4. In `random_partner_with_replacement`, sample one selected partner per agent for the first round.
 
 Return:
 
-- `observations`: list of `{"obs": np.ndarray(shape=(6,), dtype=np.float32)}`
+- `observations`: list of `{"obs": np.ndarray(shape=(2 * history_h,), dtype=np.float32)}`
 - `infos`: list of dicts
   - includes `selected_partner` in random-matching mode
   - includes `scripted_strategy` for scripted agents
