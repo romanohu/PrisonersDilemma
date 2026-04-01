@@ -20,6 +20,7 @@ PrisonersDilemmaEnv(
 ### Parameters
 
 - `num_agents`: number of agents. Must be `>= 2`.
+  - applies to both interaction modes; no mode is hard-coded to a fixed population size.
 - `max_steps`: episode horizon. Must be `> 0`.
 - `payoff_matrix`: `2 x 2` payoff matrix interpreted as standard PD `(R, S, T, P)`.
 - `scripted_opponents`: optional scripted policy assignment per agent index.
@@ -30,6 +31,18 @@ PrisonersDilemmaEnv(
 - `reward_aggregation`: reduction for the selected interaction rule (`sum` or `average`).
   - default is `average` for `all_pairs_average`, `sum` for `random_partner_with_replacement`.
 - `history_h`: observation history window length. Must be `> 0`.
+
+Example (`random_partner_with_replacement` with custom population):
+
+```python
+env = PrisonersDilemmaEnv(
+    num_agents=37,
+    max_steps=200,
+    interaction_mode="random_partner_with_replacement",
+    reward_aggregation="sum",
+    history_h=2,
+)
+```
 
 ### Scripted Opponents
 

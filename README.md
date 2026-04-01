@@ -74,14 +74,19 @@ For full details (observation layout, reward semantics, scripted policies, post-
 To emulate random partner selection without learning partner-choice policies, use:
 
 ```python
+num_agents = 8  # free to set (must be >= 2)
+max_steps = 30
+
 env = PrisonersDilemmaEnv(
-    num_agents=20,
-    max_steps=20,
+    num_agents=num_agents,
+    max_steps=max_steps,
     interaction_mode="random_partner_with_replacement",
     reward_aggregation="sum",
     history_h=1,
 )
 ```
+
+`num_agents=20` is only one common experiment size from the literature; it is not hard-coded.
 
 In this mode, each agent samples one partner `j != i` uniformly each round (with replacement),
 which yields `num_agents` directed interactions per step.
