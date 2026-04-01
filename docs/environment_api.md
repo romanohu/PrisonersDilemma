@@ -132,6 +132,7 @@ Return:
 - `truncations`: list of bools (mirrors `terminations`)
 - `infos`: per-agent dict
   - `true_objective`
+  - `episode_extra_stats.last_action` (0: C, 1: D)
   - in random-matching mode:
     - `played_partner`
     - `selected_partner` (next round)

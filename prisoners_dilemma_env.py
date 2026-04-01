@@ -335,6 +335,11 @@ class PrisonersDilemmaEnv(gym.Env):
             {"true_objective": np.asarray(self._episode_returns[agent_idx], dtype=np.float32)}
             for agent_idx in range(self.num_agents)
         ]
+        for agent_idx in range(self.num_agents):
+            last_action = int(action_list[agent_idx])
+            infos[agent_idx]["episode_extra_stats"] = {
+                "last_action": last_action,
+            }
 
         if self.interaction_mode == "random_partner_with_replacement" and interaction_counts is not None:
             assert played_partners is not None
