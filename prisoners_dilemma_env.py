@@ -1,39 +1,33 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
-from .axelrod_adapter import load_axelrod_core
-
-
-ActionEnum, GameClass = load_axelrod_core()
-
-
-@dataclass
-class _ScriptedPolicyState:
-    name: str
-    grudged: bool = False
+from .core import PairwisePrisonersDilemmaCore
+from .schedulers import InteractionScheduler, RandomPartnerScheduler
 
 
 class PrisonersDilemmaEnv(gym.Env):
+    """Multi-agent environment for pairwise Prisoner's Dilemma interactions.
+
+    The game core is always pairwise 2x2 PD.
+    Who plays with whom is delegated to an external scheduler.
+    """
+
     metadata = {"render_modes": ["rgb_array"]}
 
     def __init__(
         self,
         *,
-        num_agents: int = 2,
+        num_agents: int = 20,
         max_steps: int = 150,
         payoff_matrix: Sequence[Sequence[float]] = ((3.0, 0.0), (5.0, 1.0)),
-        scripted_opponents: Sequence[str | None] | None = None,
-        scripted_seed: int = 0,
-        interaction_mode: str = "all_pairs_average",
-        reward_aggregation: str | None = None,
         history_h: int = 1,
-        paper_action_encoding: str = "tuple_discrete",
+        scheduler: InteractionScheduler | None = None,
+        seed: int = 0,
     ):
         if int(num_agents) < 2:
             raise ValueError(f"PrisonersDilemmaEnv requires at least 2 agents, got {num_agents}")
@@ -42,165 +36,57 @@ class PrisonersDilemmaEnv(gym.Env):
         if int(history_h) <= 0:
             raise ValueError(f"history_h must be positive, got {history_h}")
 
-        payoff = np.asarray(payoff_matrix, dtype=np.float32)
-        if payoff.shape != (2, 2):
-            raise ValueError(f"payoff_matrix must be shaped (2, 2), got {tuple(payoff.shape)}")
-
         self.num_agents = int(num_agents)
         self.max_steps = int(max_steps)
-        self.payoff_matrix = payoff
         self.history_h = int(history_h)
 
-        self.interaction_mode = self._normalize_interaction_mode(interaction_mode)
-        self.paper_action_encoding = self._normalize_paper_action_encoding(paper_action_encoding)
-        self.reward_aggregation = self._normalize_reward_aggregation(reward_aggregation)
+        self.core = PairwisePrisonersDilemmaCore(payoff_matrix=payoff_matrix)
+        self.scheduler = scheduler or RandomPartnerScheduler()
+        self._rng = np.random.default_rng(int(seed))
 
-        # Reference: https://wrap.warwick.ac.uk/id/eprint/183331/2/WRAP-learning-partner-selection-rules-that-sustain-cooperation-social-dilemmas-with-the-option-of-opting-out-2024.pdf
-        # Adaptation note: each pair plays repeated PD with the same (R,S,T,P), then each agent gets pairwise-average reward.
-        r = float(payoff[0, 0])
-        s = float(payoff[0, 1])
-        t = float(payoff[1, 0])
-        p = float(payoff[1, 1])
-        self.game = GameClass(r=r, s=s, t=t, p=p)
-
-        self._action_lookup = {
-            0: ActionEnum.C,
-            1: ActionEnum.D,
-        }
-
-        self._rng = np.random.default_rng(int(scripted_seed))
-        self._scripted_by_agent = self._build_scripted_policies(scripted_opponents)
-
-        # Reference: https://arxiv.org/abs/1902.03185
-        # Adaptation note: dilemma observation includes only partner behavior history with configurable h.
+        self.action_space = spaces.Discrete(2)
         self.observation_space = spaces.Dict(
-            self._build_observation_space()
+            {
+                "obs": spaces.Box(
+                    low=0.0,
+                    high=1.0,
+                    shape=(2 * self.history_h,),
+                    dtype=np.float32,
+                )
+            }
         )
-        self.action_space = self._build_action_space()
         self.render_mode = "rgb_array"
         self.is_multiagent = True
 
         self._all_false = [False for _ in range(self.num_agents)]
         self._step = 0
-        self._last_actions = np.zeros(self.num_agents, dtype=np.int8)
+        self._last_actions = np.zeros((self.num_agents,), dtype=np.int8)  # 0: none, 1: C, 2: D
         self._action_history = np.zeros((self.num_agents, self.history_h), dtype=np.int8)
-        self._pair_action_history = np.zeros((self.num_agents, self.num_agents, self.history_h), dtype=np.int8)
-        self._episode_returns = np.zeros(self.num_agents, dtype=np.float32)
+        self._episode_returns = np.zeros((self.num_agents,), dtype=np.float32)
         self._selected_partners = np.arange(self.num_agents, dtype=np.int32)
         self.is_terminated = True
 
-    def _build_observation_space(self) -> dict[str, spaces.Space]:
-        observation_space: dict[str, spaces.Space] = {
-            "obs": spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=(2 * self.history_h,),
-                dtype=np.float32,
-            )
-        }
-        if self.interaction_mode == "paper_partner_selection":
-            observation_space["selection_obs"] = spaces.Box(
-                low=0.0,
-                high=1.0,
-                shape=(2 * self.history_h * (self.num_agents - 1),),
-                dtype=np.float32,
-            )
-        return observation_space
-
-    def _build_action_space(self) -> spaces.Space:
-        if self.interaction_mode != "paper_partner_selection":
-            return spaces.Discrete(2)
-        if self.paper_action_encoding == "dict":
-            return spaces.Dict(
-                {
-                    "selected_partner": spaces.Discrete(self.num_agents),
-                    "dilemma_actions": spaces.MultiBinary(self.num_agents),
-                }
-            )
-        tuple_spaces: list[spaces.Space] = [spaces.Discrete(self.num_agents)]
-        tuple_spaces.extend(spaces.Discrete(2) for _ in range(self.num_agents))
-        return spaces.Tuple(tuple(tuple_spaces))
-
-    def _normalize_interaction_mode(self, interaction_mode: str) -> str:
-        mode = str(interaction_mode).strip().lower()
-        supported = {
-            "all_pairs_average",
-            "random_partner_with_replacement",
-            "paper_partner_selection",
-        }
-        if mode not in supported:
-            raise ValueError(f"Unsupported interaction_mode {interaction_mode!r}. Supported: {sorted(supported)}")
-        return mode
-
-    def _normalize_reward_aggregation(self, reward_aggregation: str | None) -> str:
-        if reward_aggregation is None:
-            if self.interaction_mode in {"random_partner_with_replacement", "paper_partner_selection"}:
-                return "sum"
-            return "average"
-
-        agg = str(reward_aggregation).strip().lower()
-        supported = {"average", "sum"}
-        if agg not in supported:
-            raise ValueError(f"Unsupported reward_aggregation {reward_aggregation!r}. Supported: {sorted(supported)}")
-        return agg
-
-    def _normalize_paper_action_encoding(self, paper_action_encoding: str) -> str:
-        mode = str(paper_action_encoding).strip().lower()
-        aliases = {
-            "tuple": "tuple_discrete",
-            "discrete_tuple": "tuple_discrete",
-        }
-        mode = aliases.get(mode, mode)
-        supported = {"tuple_discrete", "dict"}
-        if mode not in supported:
+    def _validate_partner_array(self, partners: np.ndarray) -> np.ndarray:
+        arr = np.asarray(partners, dtype=np.int32)
+        if arr.shape != (self.num_agents,):
             raise ValueError(
-                "Unsupported paper_action_encoding "
-                f"{paper_action_encoding!r}. Supported: {sorted(supported)}"
+                f"scheduler output must be shape ({self.num_agents},), got {tuple(arr.shape)}"
             )
-        return mode
+        if np.any(arr < 0) or np.any(arr >= self.num_agents):
+            raise ValueError("scheduler output contains out-of-range partner ids")
+        agent_ids = np.arange(self.num_agents, dtype=np.int32)
+        if np.any(arr == agent_ids):
+            raise ValueError("scheduler output contains self-selection (partner[i] == i)")
+        return arr
 
-    def _build_scripted_policies(
-        self,
-        scripted_opponents: Sequence[str | None] | None,
-    ) -> dict[int, _ScriptedPolicyState]:
-        if scripted_opponents is None:
-            return {}
-
-        scripted = list(scripted_opponents)
-        if len(scripted) != self.num_agents:
-            raise ValueError(
-                f"scripted_opponents length must match num_agents={self.num_agents}, got {len(scripted)}"
-            )
-
-        if self.num_agents != 2:
-            raise ValueError("scripted_opponents are currently supported only when num_agents=2")
-
-        supported = {"cooperator", "defector", "titfortat", "grudger", "random"}
-        result: dict[int, _ScriptedPolicyState] = {}
-        for agent_idx, item in enumerate(scripted):
-            if item is None:
-                continue
-            name = str(item).strip().lower()
-            if not name:
-                continue
-            if name not in supported:
-                raise ValueError(
-                    f"Unsupported scripted strategy: {item!r}. Supported: {sorted(supported)}"
-                )
-            result[agent_idx] = _ScriptedPolicyState(name=name)
-        return result
-
-    def _sample_partner(self, agent_idx: int) -> int:
-        sampled = int(self._rng.integers(self.num_agents - 1))
-        if sampled >= agent_idx:
-            sampled += 1
-        return sampled
-
-    def _sample_all_partners(self) -> np.ndarray:
-        selected = np.zeros((self.num_agents,), dtype=np.int32)
-        for agent_idx in range(self.num_agents):
-            selected[agent_idx] = self._sample_partner(agent_idx)
-        return selected
+    def _select_partners(self) -> np.ndarray:
+        partners = self.scheduler.select_partners(
+            num_agents=self.num_agents,
+            rng=self._rng,
+            action_history=self._action_history.copy(),
+            step=self._step,
+        )
+        return self._validate_partner_array(partners)
 
     def _encode_action_history(self, history_codes: np.ndarray) -> np.ndarray:
         features = np.zeros((2 * self.history_h,), dtype=np.float32)
@@ -212,334 +98,80 @@ class PrisonersDilemmaEnv(gym.Env):
                 features[2 * lag + 1] = 1.0
         return features
 
-    def _build_random_mode_partner_features(self, agent_idx: int) -> np.ndarray:
-        partner_idx = int(self._selected_partners[agent_idx])
-        return self._encode_action_history(self._action_history[partner_idx])
-
-    def _build_all_pairs_history_features(self, agent_idx: int) -> np.ndarray:
-        features = np.zeros((2 * self.history_h,), dtype=np.float32)
-        for lag in range(self.history_h):
-            other_actions = np.delete(self._action_history[:, lag], agent_idx)
-            coop_ratio = float(np.mean(other_actions == 1)) if other_actions.size > 0 else 0.0
-            defect_ratio = float(np.mean(other_actions == 2)) if other_actions.size > 0 else 0.0
-            features[2 * lag] = coop_ratio
-            features[2 * lag + 1] = defect_ratio
-        return features
-
     def _build_observations(self) -> list[dict[str, np.ndarray]]:
-        observations: list[dict[str, np.ndarray]] = []
+        obs = []
         for agent_idx in range(self.num_agents):
-            if self.interaction_mode == "paper_partner_selection":
-                obs_vec = self._build_random_mode_partner_features(agent_idx)
-                selection_vec = self._build_selection_features(agent_idx)
-                observations.append(
-                    {
-                        "obs": obs_vec.astype(np.float32),
-                        "selection_obs": selection_vec.astype(np.float32),
-                    }
-                )
-                continue
-            if self.interaction_mode == "random_partner_with_replacement":
-                obs_vec = self._build_random_mode_partner_features(agent_idx)
-            else:
-                obs_vec = self._build_all_pairs_history_features(agent_idx)
-            observations.append({"obs": obs_vec.astype(np.float32)})
-        return observations
+            partner_idx = int(self._selected_partners[agent_idx])
+            obs_vec = self._encode_action_history(self._action_history[partner_idx]).astype(np.float32)
+            obs.append({"obs": obs_vec})
+        return obs
 
-    def _build_selection_features(self, agent_idx: int) -> np.ndarray:
-        features: list[np.ndarray] = []
-        for other_idx in range(self.num_agents):
-            if other_idx == agent_idx:
-                continue
-            features.append(self._encode_action_history(self._pair_action_history[other_idx, agent_idx]))
-        if not features:
-            return np.zeros((0,), dtype=np.float32)
-        return np.concatenate(features, axis=0).astype(np.float32)
+    def _validate_actions(self, actions: Iterable[int]) -> np.ndarray:
+        action_array = np.asarray(list(actions), dtype=np.int8)
+        if action_array.shape != (self.num_agents,):
+            raise ValueError(f"Expected {self.num_agents} actions, got shape {tuple(action_array.shape)}")
+        if np.any((action_array != 0) & (action_array != 1)):
+            raise ValueError("Unsupported action values. Expected only 0 (C) or 1 (D).")
+        return action_array
 
     def _reset_state(self) -> None:
         self._step = 0
         self._last_actions[:] = 0
         self._action_history[:, :] = 0
-        self._pair_action_history[:, :, :] = 0
         self._episode_returns[:] = 0.0
-        self._selected_partners[:] = np.arange(self.num_agents, dtype=np.int32)
         self.is_terminated = False
-        for state in self._scripted_by_agent.values():
-            state.grudged = False
+        self._selected_partners = self._select_partners()
 
     def reset(self, seed: int | None = None, options: dict | None = None):
         del options
         if seed is not None:
             self._rng = np.random.default_rng(int(seed))
         self._reset_state()
-        if self.interaction_mode in {"random_partner_with_replacement", "paper_partner_selection"}:
-            self._selected_partners = self._sample_all_partners()
+        observations = self._build_observations()
+        infos = [{"selected_partner": int(self._selected_partners[i])} for i in range(self.num_agents)]
+        return observations, infos
 
-        infos = []
-        for agent_idx in range(self.num_agents):
-            info = {}
-            if self.interaction_mode in {"random_partner_with_replacement", "paper_partner_selection"}:
-                info["selected_partner"] = int(self._selected_partners[agent_idx])
-            if agent_idx in self._scripted_by_agent:
-                info["scripted_strategy"] = self._scripted_by_agent[agent_idx].name
-            infos.append(info)
-        return self._build_observations(), infos
-
-    def _validate_actions(self, actions: Iterable[int]) -> list[int]:
-        action_list = [int(action) for action in actions]
-        if len(action_list) != self.num_agents:
-            raise ValueError(f"Expected {self.num_agents} actions, got {len(action_list)}")
-        for action in action_list:
-            if action not in self._action_lookup:
-                raise ValueError(f"Unsupported action {action}. Expected 0 (C) or 1 (D).")
-        return action_list
-
-    def _parse_paper_mode_action(self, raw_action: object, agent_idx: int) -> tuple[int, np.ndarray]:
-        partner_idx: int
-        dilemma_row: np.ndarray
-
-        if isinstance(raw_action, dict):
-            if "selected_partner" not in raw_action:
-                raise ValueError("paper_partner_selection action is missing 'selected_partner'")
-            if "dilemma_actions" not in raw_action:
-                raise ValueError("paper_partner_selection action is missing 'dilemma_actions'")
-
-            partner_idx = int(raw_action["selected_partner"])
-            dilemma_row = np.asarray(raw_action["dilemma_actions"], dtype=np.int8)
-        elif isinstance(raw_action, (list, tuple, np.ndarray)):
-            encoded = np.asarray(raw_action, dtype=np.int32).reshape(-1)
-            if encoded.shape != (self.num_agents + 1,):
-                raise ValueError(
-                    "paper_partner_selection tuple action must have shape "
-                    f"({self.num_agents + 1},), got {tuple(encoded.shape)}"
-                )
-            partner_idx = int(encoded[0])
-            dilemma_row = encoded[1:].astype(np.int8)
-        else:
-            raise ValueError(
-                "paper_partner_selection expects each action as either dict "
-                "or tuple/list/ndarray encoded as [selected_partner, a_0, ..., a_{n-1}]"
-            )
-
-        if partner_idx < 0 or partner_idx >= self.num_agents:
-            raise ValueError(f"selected_partner must be in [0, {self.num_agents - 1}], got {partner_idx}")
-        if partner_idx == agent_idx:
-            raise ValueError(f"agent {agent_idx} cannot select itself in paper_partner_selection mode")
-
-        if dilemma_row.shape != (self.num_agents,):
-            raise ValueError(f"dilemma_actions must have shape ({self.num_agents},), got {tuple(dilemma_row.shape)}")
-        if np.any((dilemma_row != 0) & (dilemma_row != 1)):
-            raise ValueError("dilemma_actions entries must be 0 (C) or 1 (D)")
-
-        return partner_idx, dilemma_row
-
-    def _validate_paper_mode_actions(self, actions: Iterable[object]) -> tuple[np.ndarray, np.ndarray]:
-        action_list = list(actions)
-        if len(action_list) != self.num_agents:
-            raise ValueError(f"Expected {self.num_agents} actions, got {len(action_list)}")
-
-        selected_partners = np.zeros((self.num_agents,), dtype=np.int32)
-        dilemma_actions = np.zeros((self.num_agents, self.num_agents), dtype=np.int8)
-
-        for agent_idx, raw_action in enumerate(action_list):
-            partner_idx, dilemma_row = self._parse_paper_mode_action(raw_action, agent_idx)
-            selected_partners[agent_idx] = partner_idx
-            dilemma_actions[agent_idx] = dilemma_row
-
-        return selected_partners, dilemma_actions
-
-    def _scripted_action(self, agent_idx: int, state: _ScriptedPolicyState) -> int:
-        partner_idx = 1 - agent_idx
-        partner_last = int(self._last_actions[partner_idx])
-
-        if state.name == "cooperator":
-            return 0
-        if state.name == "defector":
-            return 1
-        if state.name == "random":
-            return int(self._rng.integers(0, 2))
-        if state.name == "titfortat":
-            if partner_last == 0:
-                return 0
-            return 0 if partner_last == 1 else 1
-        if state.name == "grudger":
-            if partner_last == 2:
-                state.grudged = True
-            return 1 if state.grudged else 0
-
-        raise RuntimeError(f"Unknown scripted strategy state: {state}")
-
-    def _apply_scripted_actions(self, action_list: list[int]) -> list[int]:
-        if not self._scripted_by_agent:
-            return action_list
-
-        adjusted = list(action_list)
-        for agent_idx, state in self._scripted_by_agent.items():
-            adjusted[agent_idx] = self._scripted_action(agent_idx, state)
-        return adjusted
-
-    def _pairwise_average_rewards(self, action_list: list[int]) -> list[np.float32]:
-        scores = np.zeros(self.num_agents, dtype=np.float32)
-
-        for i in range(self.num_agents):
-            for j in range(i + 1, self.num_agents):
-                pair = (self._action_lookup[action_list[i]], self._action_lookup[action_list[j]])
-                reward_i, reward_j = self.game.score(pair)
-                scores[i] += float(reward_i)
-                scores[j] += float(reward_j)
-
-        scale = 1.0 / float(self.num_agents - 1)
-        scores *= scale
-        return [np.float32(value) for value in scores]
-
-    def _random_partner_with_replacement_rewards(
-        self,
-        action_list: list[int],
-        selected_partners: np.ndarray,
-    ) -> tuple[list[np.float32], list[int]]:
-        scores = np.zeros(self.num_agents, dtype=np.float32)
-        interaction_counts = np.zeros(self.num_agents, dtype=np.int32)
-
-        # Reference: https://arxiv.org/pdf/1902.03185
-        # Adaptation note: selection happens before dilemma in each round; this mode randomizes selection,
-        # then plays N directed dilemma interactions (one per selecting agent).
-        for agent_idx in range(self.num_agents):
-            partner_idx = int(selected_partners[agent_idx])
-            pair = (self._action_lookup[action_list[agent_idx]], self._action_lookup[action_list[partner_idx]])
-            reward_i, reward_j = self.game.score(pair)
-            scores[agent_idx] += float(reward_i)
-            scores[partner_idx] += float(reward_j)
-            interaction_counts[agent_idx] += 1
-            interaction_counts[partner_idx] += 1
-
-        if self.reward_aggregation == "average":
-            active = interaction_counts > 0
-            scores[active] = scores[active] / interaction_counts[active]
-
-        rewards = [np.float32(value) for value in scores]
-        return rewards, interaction_counts.astype(np.int32).tolist()
-
-    def _apply_pair_action_updates(self, pair_action_updates: dict[tuple[int, int], int]) -> None:
-        if self.history_h > 1:
-            self._pair_action_history[:, :, 1:] = self._pair_action_history[:, :, :-1]
-        self._pair_action_history[:, :, 0] = 0
-
-        for (actor_idx, target_idx), action_code in pair_action_updates.items():
-            self._pair_action_history[actor_idx, target_idx, 0] = int(action_code)
-
-    def _paper_partner_selection_rewards(
-        self,
-        selected_partners: np.ndarray,
-        dilemma_actions: np.ndarray,
-    ) -> tuple[list[np.float32], list[int], list[int]]:
-        scores = np.zeros(self.num_agents, dtype=np.float32)
-        interaction_counts = np.zeros(self.num_agents, dtype=np.int32)
-        selector_actions = np.zeros(self.num_agents, dtype=np.int8)
-        pair_action_updates: dict[tuple[int, int], int] = {}
-
-        for agent_idx in range(self.num_agents):
-            partner_idx = int(selected_partners[agent_idx])
-
-            selector_action = int(dilemma_actions[agent_idx, partner_idx])
-            partner_action = int(dilemma_actions[partner_idx, agent_idx])
-
-            scripted_selector = self._scripted_by_agent.get(agent_idx)
-            if scripted_selector is not None:
-                selector_action = int(self._scripted_action(agent_idx, scripted_selector))
-            scripted_partner = self._scripted_by_agent.get(partner_idx)
-            if scripted_partner is not None:
-                partner_action = int(self._scripted_action(partner_idx, scripted_partner))
-
-            selector_actions[agent_idx] = selector_action
-            pair_action_updates[(agent_idx, partner_idx)] = selector_action + 1
-            pair_action_updates[(partner_idx, agent_idx)] = partner_action + 1
-
-            pair = (self._action_lookup[selector_action], self._action_lookup[partner_action])
-            reward_i, reward_j = self.game.score(pair)
-            scores[agent_idx] += float(reward_i)
-            scores[partner_idx] += float(reward_j)
-
-            interaction_counts[agent_idx] += 1
-            interaction_counts[partner_idx] += 1
-
-        if self.reward_aggregation == "average":
-            active = interaction_counts > 0
-            scores[active] = scores[active] / interaction_counts[active]
-
-        self._apply_pair_action_updates(pair_action_updates)
-        rewards = [np.float32(value) for value in scores]
-        return rewards, interaction_counts.astype(np.int32).tolist(), selector_actions.astype(np.int8).tolist()
-
-    def step(self, actions: Iterable[int] | Iterable[dict]):
+    def step(self, actions: Iterable[int]):
         if self.is_terminated:
             obs, infos = self.reset()
             rewards = [np.float32(0.0) for _ in range(self.num_agents)]
             return obs, rewards, list(self._all_false), list(self._all_false), infos
 
-        selector_actions: list[int]
-        interaction_counts: list[int] | None = None
-        played_partners: np.ndarray | None = None
-        if self.interaction_mode == "paper_partner_selection":
-            selected_partners, dilemma_actions = self._validate_paper_mode_actions(actions)
-            self._selected_partners = selected_partners.copy()
-            rewards, interaction_counts, selector_actions = self._paper_partner_selection_rewards(
-                selected_partners,
-                dilemma_actions,
-            )
-        else:
-            action_list = self._validate_actions(actions)
-            action_list = self._apply_scripted_actions(action_list)
-            selector_actions = list(action_list)
+        action_array = self._validate_actions(actions)
+        played_partners = self._selected_partners.copy()
 
-            if self.interaction_mode == "all_pairs_average":
-                rewards = self._pairwise_average_rewards(action_list)
-            else:
-                played_partners = self._selected_partners.copy()
-                rewards, interaction_counts = self._random_partner_with_replacement_rewards(action_list, played_partners)
+        rewards_array, interaction_counts = self.core.compute_round_rewards(action_array, played_partners)
+        rewards_array = rewards_array.astype(np.float32)
 
         self._step += 1
-        latest_actions = np.asarray(selector_actions, dtype=np.int8) + 1
-        self._last_actions[:] = latest_actions
+        self._last_actions = action_array + 1  # 1: C, 2: D
         if self.history_h > 1:
             self._action_history[:, 1:] = self._action_history[:, :-1]
-        self._action_history[:, 0] = latest_actions
-        self._episode_returns += np.asarray(rewards, dtype=np.float32)
+        self._action_history[:, 0] = self._last_actions
+        self._episode_returns += rewards_array
 
-        if self.interaction_mode == "random_partner_with_replacement":
-            self._selected_partners = self._sample_all_partners()
-
+        self._selected_partners = self._select_partners()
         terminated = self._step >= self.max_steps
         self.is_terminated = terminated
 
-        obs = self._build_observations()
+        observations = self._build_observations()
+        rewards = [np.float32(value) for value in rewards_array]
         terminations = [terminated for _ in range(self.num_agents)]
         truncations = [terminated for _ in range(self.num_agents)]
-        infos = [
-            {"true_objective": np.asarray(self._episode_returns[agent_idx], dtype=np.float32)}
-            for agent_idx in range(self.num_agents)
-        ]
-        for agent_idx in range(self.num_agents):
-            last_action = int(selector_actions[agent_idx])
-            infos[agent_idx]["episode_extra_stats"] = {
-                "last_action": last_action,
-            }
 
-        if self.interaction_mode == "random_partner_with_replacement" and interaction_counts is not None:
-            assert played_partners is not None
-            for agent_idx in range(self.num_agents):
-                infos[agent_idx]["played_partner"] = int(played_partners[agent_idx])
-                infos[agent_idx]["selected_partner"] = int(self._selected_partners[agent_idx])
-                infos[agent_idx]["interaction_count"] = int(interaction_counts[agent_idx])
-        elif self.interaction_mode == "paper_partner_selection" and interaction_counts is not None:
-            for agent_idx in range(self.num_agents):
-                infos[agent_idx]["selected_partner"] = int(self._selected_partners[agent_idx])
-                infos[agent_idx]["interaction_count"] = int(interaction_counts[agent_idx])
+        infos: list[dict] = []
+        for i in range(self.num_agents):
+            infos.append(
+                {
+                    "true_objective": np.asarray(self._episode_returns[i], dtype=np.float32),
+                    "played_partner": int(played_partners[i]),
+                    "selected_partner": int(self._selected_partners[i]),
+                    "interaction_count": int(interaction_counts[i]),
+                    "episode_extra_stats": {"last_action": int(action_array[i])},
+                }
+            )
 
-        for agent_idx, state in self._scripted_by_agent.items():
-            infos[agent_idx]["scripted_strategy"] = state.name
-            infos[agent_idx]["scripted_action"] = int(selector_actions[agent_idx])
-
-        return obs, rewards, terminations, truncations, infos
+        return observations, rewards, terminations, truncations, infos
 
     def _action_color(self, action_code: int) -> np.ndarray:
         if action_code == 1:

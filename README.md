@@ -1,13 +1,12 @@
 # PrisonersDilemma Environment
 
-This repository provides a repeated Prisoner's Dilemma environment implemented with Gymnasium conventions and Axelrod game primitives.
+This repository provides a multi-agent repeated Prisoner's Dilemma environment with a clear separation of concerns:
 
-## Repository Layout
+- `core.py`: pairwise 2x2 PD reward core (`PairwisePrisonersDilemmaCore`)
+- `schedulers.py`: partner-selection scheduler interface and defaults
+- `prisoners_dilemma_env.py`: Gymnasium environment wrapper (`PrisonersDilemmaEnv`)
 
-- `prisoners_dilemma_env.py`: core environment (`PrisonersDilemmaEnv`)
-- `axelrod_adapter.py`: loading Axelrod `Action` and `Game`
-- `docs/environment_api.md`: detailed API and transition semantics
-- `Axelrod/`: upstream Axelrod submodule
+The game core is always pairwise PD. Partner selection is delegated to an external scheduler.
 
 ## Setup
 
@@ -23,78 +22,49 @@ Install runtime dependencies:
 pip install gymnasium numpy
 ```
 
-If `axelrod` is installed in your Python environment, it is used directly. Otherwise, this repository falls back to loading minimal `Action`/`Game` classes from `Axelrod/axelrod/`.
-
 ## Minimal Usage
 
 ```python
-from prisoners_dilemma_env import PrisonersDilemmaEnv
+from PrisonersDilemma import PrisonersDilemmaEnv
 
-env = PrisonersDilemmaEnv(num_agents=2, max_steps=5, history_h=1)
+env = PrisonersDilemmaEnv(
+    num_agents=20,
+    max_steps=150,
+    history_h=1,
+)
+
 obs, infos = env.reset(seed=7)
-print("reset obs shape:", obs[0]["obs"].shape)
-
-for t in range(5):
+for _ in range(5):
     # 0 = Cooperate, 1 = Defect
-    obs, rewards, terminations, truncations, infos = env.step([0, 1])
-    print(t, rewards, terminations, truncations)
+    actions = [0] * env.num_agents
+    obs, rewards, terminations, truncations, infos = env.step(actions)
     if all(terminations):
         break
 
 env.close()
 ```
 
-## `reset` and `step` Return Contract (Quick View)
-
-`reset(seed=None, options=None)` returns:
-
-1. `observations`: `list[dict[str, np.ndarray]]` with length `num_agents`
-2. `infos`: `list[dict]` with length `num_agents`
-
-`step(actions)` returns:
-
-1. `observations`: same structure as `reset`
-2. `rewards`: `list[np.float32]`, one reward per agent
-3. `terminations`: `list[bool]`
-4. `truncations`: `list[bool]`
-5. `infos`: `list[dict]`
-
-For full details (observation layout, reward semantics, scripted policies, post-termination behavior), see:
-
-- `docs/environment_api.md`
-
-## References
-
-- Gymnasium Env API: https://gymnasium.farama.org/main/api/env/
-- Sample Factory custom environment integration: https://www.samplefactory.dev/03-customization/custom-environments/
-- Axelrod documentation: https://axelrod.readthedocs.io/en/stable/index.html
-
-## Random Partner Baseline Mode
-
-To emulate random partner selection without learning partner-choice policies, use:
+## Custom Scheduler Example
 
 ```python
-num_agents = 8  # free to set (must be >= 2)
-max_steps = 30
+import numpy as np
+from PrisonersDilemma import PrisonersDilemmaEnv, InteractionScheduler
 
-env = PrisonersDilemmaEnv(
-    num_agents=num_agents,
-    max_steps=max_steps,
-    interaction_mode="random_partner_with_replacement",
-    reward_aggregation="sum",
-    history_h=1,
-)
+
+class RoundRobinScheduler(InteractionScheduler):
+    def select_partners(self, *, num_agents, rng, action_history, step):
+        del rng, action_history
+        idx = np.arange(num_agents, dtype=np.int32)
+        return (idx + step + 1) % num_agents
+
+
+env = PrisonersDilemmaEnv(num_agents=8, scheduler=RoundRobinScheduler())
 ```
 
-`num_agents=20` is only one common experiment size from the literature; it is not hard-coded.
+## Notes
 
-In this mode, each agent samples one partner `j != i` uniformly each round (with replacement),
-which yields `num_agents` directed interactions per step.
+- The default scheduler is uniform random partner selection with replacement.
+- Each step runs `num_agents` directed pairwise interactions (`i -> partner[i]`).
+- Observation is partner-behavior history only, shaped `(2 * history_h,)`.
 
-## Observation Summary
-
-The environment exposes partner-behavior history only:
-
-- Observation shape is `(2 * history_h,)`
-- For each lag `k`, the pair `[2*k, 2*k+1]` encodes cooperation/defection
-- Default is `history_h=1`, i.e. only the most recent partner behavior
+For full transition semantics, see `docs/environment_api.md`.

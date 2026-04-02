@@ -1,145 +1,121 @@
 # Environment API and Transition Semantics
 
-This document describes exactly how `PrisonersDilemmaEnv` transitions state and what each API call returns.
+This document describes the current API of `PrisonersDilemmaEnv`.
+
+## Design
+
+The implementation is split into three layers:
+
+1. Pairwise PD reward core (`PairwisePrisonersDilemmaCore`)
+2. Partner-selection scheduler (`InteractionScheduler`)
+3. Gymnasium environment wrapper (`PrisonersDilemmaEnv`)
+
+`PrisonersDilemmaEnv` always uses pairwise 2x2 PD rewards.
+Who interacts with whom is handled by the scheduler.
 
 ## Constructor
 
 ```python
 PrisonersDilemmaEnv(
-    num_agents: int = 2,
+    num_agents: int = 20,
     max_steps: int = 150,
     payoff_matrix: Sequence[Sequence[float]] = ((3.0, 0.0), (5.0, 1.0)),
-    scripted_opponents: Sequence[str | None] | None = None,
-    scripted_seed: int = 0,
-    interaction_mode: str = "all_pairs_average",
-    reward_aggregation: str | None = None,
     history_h: int = 1,
+    scheduler: InteractionScheduler | None = None,
+    seed: int = 0,
 )
 ```
 
 ### Parameters
 
-- `num_agents`: number of agents. Must be `>= 2`.
-  - applies to both interaction modes; no mode is hard-coded to a fixed population size.
-- `max_steps`: episode horizon. Must be `> 0`.
-- `payoff_matrix`: `2 x 2` payoff matrix interpreted as standard PD `(R, S, T, P)`.
-- `scripted_opponents`: optional scripted policy assignment per agent index.
-- `scripted_seed`: RNG seed used by scripted random policies.
-- `interaction_mode`: interaction rule.
-  - `all_pairs_average`: all unordered pairs interact; per-agent reward is averaged by `(num_agents - 1)`.
-  - `random_partner_with_replacement`: each round has a random selection stage, then a dilemma stage.
-- `reward_aggregation`: reduction for the selected interaction rule (`sum` or `average`).
-  - default is `average` for `all_pairs_average`, `sum` for `random_partner_with_replacement`.
-- `history_h`: observation history window length. Must be `> 0`.
+- `num_agents`: number of agents (`>= 2`)
+- `max_steps`: episode horizon (`> 0`)
+- `payoff_matrix`: 2x2 PD payoff matrix
+- `history_h`: observation history window length (`> 0`)
+- `scheduler`: external partner-selection scheduler
+  - defaults to `RandomPartnerScheduler` when `None`
+- `seed`: RNG seed for scheduler sampling
 
-Example (`random_partner_with_replacement` with custom population):
+## Scheduler Contract
+
+Scheduler must implement:
 
 ```python
-env = PrisonersDilemmaEnv(
-    num_agents=37,
-    max_steps=200,
-    interaction_mode="random_partner_with_replacement",
-    reward_aggregation="sum",
-    history_h=2,
-)
+select_partners(
+    *,
+    num_agents: int,
+    rng: np.random.Generator,
+    action_history: np.ndarray,
+    step: int,
+) -> np.ndarray
 ```
 
-### Scripted Opponents
+Return value requirements:
 
-Supported scripted policy names:
-
-- `cooperator`
-- `defector`
-- `titfortat`
-- `grudger`
-- `random`
-
-Notes:
-
-- Scripted opponents are currently supported only when `num_agents == 2`.
-- Use `None` for agents that should stay externally controlled.
+- shape `(num_agents,)`
+- integer partner ids
+- `partner[i] != i`
 
 ## Observation and Action Spaces
 
 - `action_space = spaces.Discrete(2)`
-  - `0`: Cooperate (C)
-  - `1`: Defect (D)
+  - `0`: Cooperate (`C`)
+  - `1`: Defect (`D`)
 
 - `observation_space = spaces.Dict({"obs": Box(shape=(2 * history_h,), dtype=float32)})`
 
-Per-agent observation vector layout (`obs`, length `2 * history_h`):
+For each lag `k`:
 
-For each lag `k` from `0` to `history_h - 1`:
+- `obs[2*k]`: partner cooperated at lag `k`
+- `obs[2*k+1]`: partner defected at lag `k`
 
-- `obs[2*k]`: cooperation feature at lag `k`
-- `obs[2*k+1]`: defection feature at lag `k`
+`k=0` is most recent.
 
-`k=0` is the most recent interaction history, `k=1` is one step older, and so on.
+## Step Semantics
 
-Feature semantics by mode:
+One environment step does:
 
-- `all_pairs_average`: each lag pair stores the ratio of opponents that cooperated/defected at that lag.
-- `random_partner_with_replacement`: each lag pair stores one selected partner's action history as one-hot (`[1,0]` for C, `[0,1]` for D, `[0,0]` when history is empty).
+1. Uses already-sampled partners `partner[i]` for this round
+2. Applies one directed pairwise PD interaction per agent: `(i -> partner[i])`
+3. Updates per-agent cumulative returns and history
+4. Samples partners for next round via scheduler
+
+This yields `num_agents` directed interactions per step.
 
 ## `reset(seed=None, options=None)`
 
 State transition:
 
-1. Optional re-seed.
-2. Clear step counter, previous actions, action-history buffer, episode returns.
-3. Reset scripted policy internal state.
-4. In `random_partner_with_replacement`, sample one selected partner per agent for the first round.
+1. optional reseed
+2. clear episode state/history
+3. sample first-round partners using scheduler
 
 Return:
 
-- `observations`: list of `{"obs": np.ndarray(shape=(2 * history_h,), dtype=np.float32)}`
-- `infos`: list of dicts
-  - includes `selected_partner` in random-matching mode
-  - includes `scripted_strategy` for scripted agents
+- `observations`: list of `{"obs": np.ndarray}` length `num_agents`
+- `infos`: list of dicts containing `selected_partner`
 
 ## `step(actions)`
 
 Input:
 
-- `actions`: iterable of length `num_agents`
-- each action must be `0` or `1`
-
-Validation and overrides:
-
-1. validate action length/values
-2. apply scripted overrides where configured
-
-Reward calculation:
-
-- `all_pairs_average`
-  1. evaluate all unordered pairs
-  2. accumulate pair payoffs
-  3. divide by `(num_agents - 1)`
-
-- `random_partner_with_replacement`
-  1. use pre-sampled `selected_partner` for this round (`played_partner`)
-  2. run one directed dilemma interaction per selecting agent
-  3. aggregate with `sum` or `average`
-  4. sample `selected_partner` for the next round
+- iterable length `num_agents`
+- each action in `{0, 1}`
 
 Return:
 
 `(observations, rewards, terminations, truncations, infos)`
 
-- `observations`: next-round observations
-- `rewards`: `list[np.float32]`
-- `terminations`: list of bools
-- `truncations`: list of bools (mirrors `terminations`)
-- `infos`: per-agent dict
+- `observations`: next-round partner-history observations
+- `rewards`: list of `np.float32`
+- `terminations`: all-true when `step >= max_steps`
+- `truncations`: mirrors `terminations`
+- `infos` per agent:
   - `true_objective`
-  - `episode_extra_stats.last_action` (0: C, 1: D)
-  - in random-matching mode:
-    - `played_partner`
-    - `selected_partner` (next round)
-    - `interaction_count`
-  - scripted extras when applicable:
-    - `scripted_strategy`
-    - `scripted_action`
+  - `played_partner`
+  - `selected_partner` (for next round)
+  - `interaction_count`
+  - `episode_extra_stats.last_action`
 
 ## Post-Termination Behavior
 
@@ -147,4 +123,4 @@ If `step` is called after termination, environment auto-resets and returns zero 
 
 ## Render
 
-`render()` returns an RGB `np.ndarray` frame showing per-agent previous actions and episode progress.
+`render()` returns an RGB `np.ndarray` frame showing per-agent latest action and episode progress.
