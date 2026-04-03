@@ -1,12 +1,11 @@
 # PrisonersDilemma Environment
 
-This repository provides a multi-agent repeated Prisoner's Dilemma environment with a clear separation of concerns:
+This repository provides a minimal repeated Prisoner's Dilemma environment for Sample Factory integration:
 
-- `core.py`: pairwise 2x2 PD reward core (`PairwisePrisonersDilemmaCore`)
-- `schedulers.py`: partner-selection scheduler interface and defaults
-- `prisoners_dilemma_env.py`: Gymnasium environment wrapper (`PrisonersDilemmaEnv`)
+- `core.py`: pairwise 2x2 PD payoff definition (`PairwisePrisonersDilemmaCore`)
+- `prisoners_dilemma_env.py`: Gymnasium environment wrapper (`PrisonersDilemmaEnv`, 2-agent fixed duel)
 
-The game core is always pairwise PD. Partner selection is delegated to an external scheduler.
+The environment is intentionally minimal: exactly 2 agents play one PD game per step.
 
 ## Setup
 
@@ -28,7 +27,7 @@ pip install gymnasium numpy
 from PrisonersDilemma import PrisonersDilemmaEnv
 
 env = PrisonersDilemmaEnv(
-    num_agents=20,
+    num_agents=2,
     max_steps=150,
     history_h=1,
 )
@@ -44,27 +43,10 @@ for _ in range(5):
 env.close()
 ```
 
-## Custom Scheduler Example
-
-```python
-import numpy as np
-from PrisonersDilemma import PrisonersDilemmaEnv, InteractionScheduler
-
-
-class RoundRobinScheduler(InteractionScheduler):
-    def select_partners(self, *, num_agents, rng, action_history, step):
-        del rng, action_history
-        idx = np.arange(num_agents, dtype=np.int32)
-        return (idx + step + 1) % num_agents
-
-
-env = PrisonersDilemmaEnv(num_agents=8, scheduler=RoundRobinScheduler())
-```
-
 ## Notes
 
-- The default scheduler is uniform random partner selection with replacement.
-- Each step runs `num_agents` directed pairwise interactions (`i -> partner[i]`).
+- `num_agents` must be `2`.
+- Pairing is fixed as `0 <-> 1`.
 - Observation is partner-behavior history only, shaped `(2 * history_h,)`.
 
 For full transition semantics, see `docs/environment_api.md`.
