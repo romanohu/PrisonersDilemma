@@ -7,14 +7,16 @@ from gymnasium import spaces
 import numpy as np
 
 from .core import PairwisePrisonersDilemmaCore
-from .schedulers import InteractionScheduler, RandomPartnerScheduler
 
 
 class PrisonersDilemmaEnv(gym.Env):
-    """Multi-agent environment for pairwise Prisoner's Dilemma interactions.
+    """Minimal repeated Prisoner's Dilemma environment for two agents.
 
-    The game core is always pairwise 2x2 PD.
-    Who plays with whom is delegated to an external scheduler.
+    This environment intentionally keeps only the functionality needed for
+    policy-mapping based partner-selection experiments:
+    - exactly 2 agents per environment instance
+    - one undirected PD game per environment step
+    - observation is partner action history (one-hot, length 2 * history_h)
     """
 
     metadata = {"render_modes": ["rgb_array"]}
@@ -22,27 +24,29 @@ class PrisonersDilemmaEnv(gym.Env):
     def __init__(
         self,
         *,
-        num_agents: int = 20,
+        num_agents: int = 2,
         max_steps: int = 150,
         payoff_matrix: Sequence[Sequence[float]] = ((3.0, 0.0), (5.0, 1.0)),
         history_h: int = 1,
-        scheduler: InteractionScheduler | None = None,
         seed: int = 0,
     ):
-        if int(num_agents) < 2:
-            raise ValueError(f"PrisonersDilemmaEnv requires at least 2 agents, got {num_agents}")
+        if int(num_agents) != 2:
+            raise ValueError(
+                "PrisonersDilemmaEnv is refactored for 2-agent repeated PD only. "
+                f"Got num_agents={num_agents}."
+            )
         if int(max_steps) <= 0:
             raise ValueError(f"max_steps must be positive, got {max_steps}")
         if int(history_h) <= 0:
             raise ValueError(f"history_h must be positive, got {history_h}")
 
-        self.num_agents = int(num_agents)
+        self.num_agents = 2
         self.max_steps = int(max_steps)
         self.history_h = int(history_h)
 
         self.core = PairwisePrisonersDilemmaCore(payoff_matrix=payoff_matrix)
-        self.scheduler = scheduler or RandomPartnerScheduler()
         self._rng = np.random.default_rng(int(seed))
+        self._partner_ids = np.asarray([1, 0], dtype=np.int32)
 
         self.action_space = spaces.Discrete(2)
         self.observation_space = spaces.Dict(
@@ -63,30 +67,7 @@ class PrisonersDilemmaEnv(gym.Env):
         self._last_actions = np.zeros((self.num_agents,), dtype=np.int8)  # 0: none, 1: C, 2: D
         self._action_history = np.zeros((self.num_agents, self.history_h), dtype=np.int8)
         self._episode_returns = np.zeros((self.num_agents,), dtype=np.float32)
-        self._selected_partners = np.arange(self.num_agents, dtype=np.int32)
         self.is_terminated = True
-
-    def _validate_partner_array(self, partners: np.ndarray) -> np.ndarray:
-        arr = np.asarray(partners, dtype=np.int32)
-        if arr.shape != (self.num_agents,):
-            raise ValueError(
-                f"scheduler output must be shape ({self.num_agents},), got {tuple(arr.shape)}"
-            )
-        if np.any(arr < 0) or np.any(arr >= self.num_agents):
-            raise ValueError("scheduler output contains out-of-range partner ids")
-        agent_ids = np.arange(self.num_agents, dtype=np.int32)
-        if np.any(arr == agent_ids):
-            raise ValueError("scheduler output contains self-selection (partner[i] == i)")
-        return arr
-
-    def _select_partners(self) -> np.ndarray:
-        partners = self.scheduler.select_partners(
-            num_agents=self.num_agents,
-            rng=self._rng,
-            action_history=self._action_history.copy(),
-            step=self._step,
-        )
-        return self._validate_partner_array(partners)
 
     def _encode_action_history(self, history_codes: np.ndarray) -> np.ndarray:
         features = np.zeros((2 * self.history_h,), dtype=np.float32)
@@ -101,7 +82,7 @@ class PrisonersDilemmaEnv(gym.Env):
     def _build_observations(self) -> list[dict[str, np.ndarray]]:
         obs = []
         for agent_idx in range(self.num_agents):
-            partner_idx = int(self._selected_partners[agent_idx])
+            partner_idx = int(self._partner_ids[agent_idx])
             obs_vec = self._encode_action_history(self._action_history[partner_idx]).astype(np.float32)
             obs.append({"obs": obs_vec})
         return obs
@@ -120,7 +101,6 @@ class PrisonersDilemmaEnv(gym.Env):
         self._action_history[:, :] = 0
         self._episode_returns[:] = 0.0
         self.is_terminated = False
-        self._selected_partners = self._select_partners()
 
     def reset(self, seed: int | None = None, options: dict | None = None):
         del options
@@ -128,7 +108,7 @@ class PrisonersDilemmaEnv(gym.Env):
             self._rng = np.random.default_rng(int(seed))
         self._reset_state()
         observations = self._build_observations()
-        infos = [{"selected_partner": int(self._selected_partners[i])} for i in range(self.num_agents)]
+        infos = [{"selected_partner": int(self._partner_ids[i])} for i in range(self.num_agents)]
         return observations, infos
 
     def step(self, actions: Iterable[int]):
@@ -138,10 +118,15 @@ class PrisonersDilemmaEnv(gym.Env):
             return obs, rewards, list(self._all_false), list(self._all_false), infos
 
         action_array = self._validate_actions(actions)
-        played_partners = self._selected_partners.copy()
-
-        rewards_array, interaction_counts = self.core.compute_round_rewards(action_array, played_partners)
-        rewards_array = rewards_array.astype(np.float32)
+        played_partners = self._partner_ids
+        payoff = self.core.payoff
+        action_0 = int(action_array[0])
+        action_1 = int(action_array[1])
+        rewards_array = np.asarray(
+            [payoff[action_0, action_1], payoff[action_1, action_0]],
+            dtype=np.float32,
+        )
+        interaction_counts = np.asarray([1, 1], dtype=np.int32)
 
         self._step += 1
         self._last_actions = action_array + 1  # 1: C, 2: D
@@ -150,7 +135,6 @@ class PrisonersDilemmaEnv(gym.Env):
         self._action_history[:, 0] = self._last_actions
         self._episode_returns += rewards_array
 
-        self._selected_partners = self._select_partners()
         terminated = self._step >= self.max_steps
         self.is_terminated = terminated
 
@@ -165,9 +149,12 @@ class PrisonersDilemmaEnv(gym.Env):
                 {
                     "true_objective": np.asarray(self._episode_returns[i], dtype=np.float32),
                     "played_partner": int(played_partners[i]),
-                    "selected_partner": int(self._selected_partners[i]),
+                    "selected_partner": int(played_partners[i]),
                     "interaction_count": int(interaction_counts[i]),
-                    "episode_extra_stats": {"last_action": int(action_array[i])},
+                    "episode_extra_stats": {
+                        "last_action": int(action_array[i]),
+                        "partner_last_action": int(action_array[int(played_partners[i])]),
+                    },
                 }
             )
 
