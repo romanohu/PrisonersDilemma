@@ -4,57 +4,35 @@ This document describes the current API of `PrisonersDilemmaEnv`.
 
 ## Design
 
-The implementation is split into three layers:
+The implementation is split into two layers:
 
 1. Pairwise PD reward core (`PairwisePrisonersDilemmaCore`)
-2. Partner-selection scheduler (`InteractionScheduler`)
-3. Gymnasium environment wrapper (`PrisonersDilemmaEnv`)
+2. Gymnasium environment wrapper (`PrisonersDilemmaEnv`)
 
-`PrisonersDilemmaEnv` always uses pairwise 2x2 PD rewards.
-Who interacts with whom is handled by the scheduler.
+`PrisonersDilemmaEnv` is intentionally minimal:
+- exactly 2 agents
+- fixed pairing `0 <-> 1`
+- one undirected PD game per step
 
 ## Constructor
 
 ```python
 PrisonersDilemmaEnv(
-    num_agents: int = 20,
+    num_agents: int = 2,
     max_steps: int = 150,
     payoff_matrix: Sequence[Sequence[float]] = ((3.0, 0.0), (5.0, 1.0)),
     history_h: int = 1,
-    scheduler: InteractionScheduler | None = None,
     seed: int = 0,
 )
 ```
 
 ### Parameters
 
-- `num_agents`: number of agents (`>= 2`)
+- `num_agents`: must be `2`
 - `max_steps`: episode horizon (`> 0`)
 - `payoff_matrix`: 2x2 PD payoff matrix
 - `history_h`: observation history window length (`> 0`)
-- `scheduler`: external partner-selection scheduler
-  - defaults to `RandomPartnerScheduler` when `None`
-- `seed`: RNG seed for scheduler sampling
-
-## Scheduler Contract
-
-Scheduler must implement:
-
-```python
-select_partners(
-    *,
-    num_agents: int,
-    rng: np.random.Generator,
-    action_history: np.ndarray,
-    step: int,
-) -> np.ndarray
-```
-
-Return value requirements:
-
-- shape `(num_agents,)`
-- integer partner ids
-- `partner[i] != i`
+- `seed`: RNG seed (reserved for reproducibility hooks)
 
 ## Observation and Action Spaces
 
@@ -75,12 +53,12 @@ For each lag `k`:
 
 One environment step does:
 
-1. Uses already-sampled partners `partner[i]` for this round
-2. Applies one directed pairwise PD interaction per agent: `(i -> partner[i])`
-3. Updates per-agent cumulative returns and history
-4. Samples partners for next round via scheduler
-
-This yields `num_agents` directed interactions per step.
+1. Uses fixed partners (`0 <-> 1`)
+2. Applies one PD game with actions `(a0, a1)`
+3. Assigns rewards:
+   - agent 0: `payoff[a0, a1]`
+   - agent 1: `payoff[a1, a0]`
+4. Updates per-agent cumulative returns and history
 
 ## `reset(seed=None, options=None)`
 
@@ -88,7 +66,6 @@ State transition:
 
 1. optional reseed
 2. clear episode state/history
-3. sample first-round partners using scheduler
 
 Return:
 
@@ -113,9 +90,10 @@ Return:
 - `infos` per agent:
   - `true_objective`
   - `played_partner`
-  - `selected_partner` (for next round)
+  - `selected_partner` (same as `played_partner`, compatibility field)
   - `interaction_count`
   - `episode_extra_stats.last_action`
+  - `episode_extra_stats.partner_last_action`
 
 ## Post-Termination Behavior
 
