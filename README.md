@@ -9,12 +9,6 @@ The environment is intentionally minimal: exactly 2 agents play one PD game per 
 
 ## Setup
 
-Initialize submodules:
-
-```bash
-git submodule update --init --recursive
-```
-
 Install runtime dependencies:
 
 ```bash
