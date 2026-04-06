@@ -33,7 +33,7 @@ env = PopulationPrisonersDilemmaEnv(
     num_agents=8,
     max_steps=150,
     history_h=2,
-    partner_scheduler="random_with_replacement",
+    partner_scheduler="random_with_replacement_each_step",
 )
 
 obs, infos = env.reset(seed=7)
@@ -53,6 +53,12 @@ Constraints for `options["partners"]`:
 - each id must be in `[0, num_agents)`
 - self-partnering (`partners[i] == i`) is not allowed
 
+You can also set partners directly before a step:
+
+```python
+env.set_partners([1, 0, 1, 2, 3, 4, 5, 6])
+```
+
 ### Fixed 2-Agent Environment
 
 ```python
@@ -69,9 +75,13 @@ obs, rewards, terminations, truncations, infos = env.step([0, 1])
   - `0`: Cooperate (`C`)
   - `1`: Defect (`D`)
 - Observation is partner-action history encoded as one-hot features of shape `(2 * history_h,)`.
-- `PopulationPrisonersDilemmaEnv` currently supports only:
+- `PopulationPrisonersDilemmaEnv` supports:
   - `partner_scheduler="random_with_replacement"`
-- In the population env, partners are chosen at `reset` and remain fixed within an episode.
+  - `partner_scheduler="random_with_replacement_each_step"`
+- Scheduler behavior:
+  - `random_with_replacement`: partners are sampled at `reset` and fixed for the episode.
+  - `random_with_replacement_each_step`: partners are resampled every non-terminal step.
+- `set_partners(...)` overrides the current partner assignment immediately (after validation).
 - If `step` is called after termination, env auto-resets and returns zero rewards with non-terminal flags.
 
 See `docs/environment_api.md` for complete transition semantics and info fields.
