@@ -83,8 +83,18 @@ obs, rewards, terminations, truncations, infos = env.step([0, 1])
 - `PopulationPrisonersDilemmaEnv` action space is `MultiDiscrete([2] * (num_agents - 1))`:
   - each agent outputs one C/D action per possible opponent (excluding self)
   - legacy input `[a_0, ..., a_{N-1}]` is still accepted and broadcast per opponent
+- Population step semantics:
+  - every step, all agents play directed interactions `i -> partners[i]`
+  - if agent `j` is selected by multiple selectors in the same step, `j` can respond
+    with different actions to each selector (per-opponent columns)
+  - selected-side rewards are accumulated into the same step reward
 - Observation in population env is all-other-agents action history, shape
   `(2 * history_h * (num_agents - 1))`.
+- History update detail:
+  - the history stored for agent `i` at step `t` is the action used in
+    `i -> partners[i]` at that step
+  - selected-side responses from multiple incoming interactions are not stored
+    as separate history entries
 - `PopulationPrisonersDilemmaEnv` supports:
   - `partner_scheduler="random_with_replacement"`
   - `partner_scheduler="random_with_replacement_each_step"`

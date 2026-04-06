@@ -141,6 +141,13 @@ Note:
   the partner used for reward computation in the current step.
 - `episode_extra_stats.last_action` is the selector action used in agent `i`'s
   own directed interaction `i -> partners[i]`.
+- If agent `j` is selected by multiple selectors in one step, `j` can output
+  different responses per selector via per-opponent action columns.
+- Selected-side rewards from those incoming interactions are accumulated in the
+  same step reward of agent `j`.
+- Action history update stores only one action per agent per step:
+  the selector-side action from that agent's own directed interaction
+  `i -> partners[i]`.
 - `observations` contain all-other-agent histories and are independent of the
   currently selected partner ids.
 
