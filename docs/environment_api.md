@@ -69,11 +69,14 @@ PopulationPrisonersDilemmaEnv(
 - `history_h`: must be `> 0`
 - `payoff_matrix`: 2x2 matrix
 - `seed`: RNG seed
-- `partner_scheduler`: currently only `"random_with_replacement"` is supported
+- `partner_scheduler`: one of
+  - `"random_with_replacement"`
+  - `"random_with_replacement_each_step"`
 
 ### Partner Assignment
 
-Partners are determined at `reset` and then fixed for the episode.
+Partners are represented by an internal directed assignment vector where each
+agent `i` plays against exactly one partner `partners[i]` (`partners[i] != i`).
 
 `reset(seed=None, options=None)`:
 
@@ -91,6 +94,14 @@ Sampling rule for `"random_with_replacement"`:
 - each agent independently samples one partner from all other agents
 - the same partner can be sampled by multiple agents
 
+`"random_with_replacement_each_step"` uses the same sampling rule, but it
+resamples partners every non-terminal `step`.
+
+`set_partners(partners)`:
+
+- validates with the same constraints as `options["partners"]`
+- updates partner assignment immediately (useful for external policy-mapping control)
+
 ### `step(actions)`
 
 Input:
@@ -107,6 +118,16 @@ State transition:
    - per-agent latest action and action history
    - per-agent cumulative return
 4. Set terminal flags when `step >= max_steps`.
+5. If scheduler is `"random_with_replacement_each_step"` and episode is not
+   terminated, sample partners for the next step.
+
+Note:
+
+- `infos[i]["selected_partner"]` / `infos[i]["played_partner"]` always refer to
+  the partner used for reward computation in the current step.
+- `observations` are built from the environment's current partner assignment
+  after transition updates (which may already be the next-step partner when
+  using `"random_with_replacement_each_step"`).
 
 Per-agent `infos[i]` includes:
 
