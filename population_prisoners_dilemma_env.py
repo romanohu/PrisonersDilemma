@@ -46,13 +46,14 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
         self.core = PairwisePrisonersDilemmaCore(payoff_matrix=payoff_matrix)
         self._rng = np.random.default_rng(int(seed))
 
-        self.action_space = spaces.Discrete(2)
+        # Each agent outputs one C/D action for every possible opponent (excluding self).
+        self.action_space = spaces.MultiDiscrete(np.full((self.num_agents - 1,), 2, dtype=np.int64))
         self.observation_space = spaces.Dict(
             {
                 "obs": spaces.Box(
                     low=0.0,
                     high=1.0,
-                    shape=(2 * self.history_h,),
+                    shape=(2 * self.history_h * (self.num_agents - 1),),
                     dtype=np.float32,
                 )
             }
@@ -66,6 +67,14 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
         self._action_history = np.zeros((self.num_agents, self.history_h), dtype=np.int8)
         self._episode_returns = np.zeros((self.num_agents,), dtype=np.float32)
         self._partners = np.zeros((self.num_agents,), dtype=np.int32)
+        self._opponent_ids = [
+            np.asarray([opponent for opponent in range(self.num_agents) if opponent != agent_idx], dtype=np.int32)
+            for agent_idx in range(self.num_agents)
+        ]
+        self._opponent_to_col = np.full((self.num_agents, self.num_agents), -1, dtype=np.int32)
+        for agent_idx in range(self.num_agents):
+            for col_idx, opponent_idx in enumerate(self._opponent_ids[agent_idx]):
+                self._opponent_to_col[agent_idx, int(opponent_idx)] = int(col_idx)
         self.is_terminated = True
 
     def _sample_partners(self) -> np.ndarray:
@@ -102,18 +111,33 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
     def _build_observations(self) -> list[dict[str, np.ndarray]]:
         obs = []
         for agent_idx in range(self.num_agents):
-            partner_idx = int(self._partners[agent_idx])
-            obs_vec = self._encode_action_history(self._action_history[partner_idx]).astype(np.float32)
+            opp_histories = [self._encode_action_history(self._action_history[int(opponent_idx)]) for opponent_idx in self._opponent_ids[agent_idx]]
+            obs_vec = np.concatenate(opp_histories, axis=0).astype(np.float32)
             obs.append({"obs": obs_vec})
         return obs
 
     def _validate_actions(self, actions: Iterable[int]) -> np.ndarray:
         action_array = np.asarray(list(actions), dtype=np.int8)
-        if action_array.shape != (self.num_agents,):
-            raise ValueError(f"Expected {self.num_agents} actions, got shape {tuple(action_array.shape)}")
+        if action_array.shape == (self.num_agents,):
+            # Backward-compatibility: one action per agent, broadcast to all opponents.
+            if np.any((action_array != 0) & (action_array != 1)):
+                raise ValueError("Unsupported action values. Expected only 0 (C) or 1 (D).")
+            return np.repeat(action_array.reshape(self.num_agents, 1), self.num_agents - 1, axis=1)
+
+        if action_array.shape != (self.num_agents, self.num_agents - 1):
+            raise ValueError(
+                f"Expected actions shaped ({self.num_agents}, {self.num_agents - 1}) "
+                f"or ({self.num_agents},), got shape {tuple(action_array.shape)}"
+            )
         if np.any((action_array != 0) & (action_array != 1)):
             raise ValueError("Unsupported action values. Expected only 0 (C) or 1 (D).")
         return action_array
+
+    def _action_for_pair(self, action_matrix: np.ndarray, actor_idx: int, opponent_idx: int) -> int:
+        col_idx = int(self._opponent_to_col[actor_idx, opponent_idx])
+        if col_idx < 0:
+            raise ValueError(f"Self interaction is not allowed: actor={actor_idx}, opponent={opponent_idx}")
+        return int(action_matrix[actor_idx, col_idx])
 
     def _reset_state(self) -> None:
         self._step = 0
@@ -145,12 +169,25 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
             rewards = [np.float32(0.0) for _ in range(self.num_agents)]
             return obs, rewards, list(self._all_false), list(self._all_false), infos
 
-        action_array = self._validate_actions(actions)
+        action_matrix = self._validate_actions(actions)
         played_partners = self._partners.copy()
-        rewards_array, interaction_counts = self.core.compute_round_rewards(action_array, played_partners)
+        payoff = self.core.payoff
+        rewards_array = np.zeros((self.num_agents,), dtype=np.float32)
+        interaction_counts = np.ones((self.num_agents,), dtype=np.int32)
+        np.add.at(interaction_counts, played_partners, 1)
+        selector_actions = np.zeros((self.num_agents,), dtype=np.int8)
+
+        for selector_idx in range(self.num_agents):
+            partner_idx = int(played_partners[selector_idx])
+            selector_action = self._action_for_pair(action_matrix, selector_idx, partner_idx)
+            partner_response = self._action_for_pair(action_matrix, partner_idx, selector_idx)
+            selector_actions[selector_idx] = selector_action + 1
+
+            rewards_array[selector_idx] += np.float32(payoff[selector_action, partner_response])
+            rewards_array[partner_idx] += np.float32(payoff[partner_response, selector_action])
 
         self._step += 1
-        self._last_actions = action_array + 1  # 1: C, 2: D
+        self._last_actions = selector_actions  # 1: C, 2: D (selector action against its chosen partner)
         if self.history_h > 1:
             self._action_history[:, 1:] = self._action_history[:, :-1]
         self._action_history[:, 0] = self._last_actions
@@ -170,6 +207,8 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
         infos: list[dict] = []
         for i in range(self.num_agents):
             partner = int(played_partners[i])
+            selector_action = self._action_for_pair(action_matrix, i, partner)
+            partner_response = self._action_for_pair(action_matrix, partner, i)
             infos.append(
                 {
                     "true_objective": np.asarray(self._episode_returns[i], dtype=np.float32),
@@ -177,8 +216,8 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
                     "selected_partner": partner,
                     "interaction_count": int(interaction_counts[i]),
                     "episode_extra_stats": {
-                        "last_action": int(action_array[i]),
-                        "partner_last_action": int(action_array[partner]),
+                        "last_action": int(selector_action),
+                        "partner_last_action": int(partner_response),
                     },
                 }
             )
