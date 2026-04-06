@@ -111,6 +111,17 @@ resamples partners at every non-terminal round boundary.
 - validates with the same constraints as `options["partners"]`
 - updates partner assignment at the next round boundary (useful for external policy-mapping control)
 
+### Partner Assignment Timing (with external controller)
+
+When this environment is controlled by an external partner-selection module:
+
+1. `set_partners(...)` does not immediately replace the current round assignment.
+2. It stores the assignment as a pending value.
+3. The pending value is consumed only at `_begin_round()`.
+4. If `set_partners(...)` is called multiple times before `_begin_round()`, the latest call overwrites earlier pending values.
+
+Operationally, this means one round runs with one fixed assignment, and the assignment is decided at round start from the latest pending value available at that moment.
+
 ### `step(actions)`
 
 Input:
@@ -148,6 +159,7 @@ Note:
   `i -> partners[i]`.
 - `infos[i]["is_active"]` indicates whether agent `i` is active for the next
   interaction step.
+- For agents with `is_active=False`, observation is a zero vector for that step.
 
 Per-agent `infos[i]` includes:
 
