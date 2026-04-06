@@ -14,13 +14,10 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
 
     Design note:
     - Public action space is Discrete(2) per agent (C/D only).
-    - One environment step processes one directed interaction in the current round.
+    - One environment step processes one full round.
     - A round consists of ``num_agents`` directed interactions: selector i plays against
-      partner partners[i].
+      partner partners[i], all processed within the same step.
     - Episode length ``max_steps`` is measured in rounds.
-
-    This keeps policy action space C/D-only while allowing selected agents to output
-    potentially different responses to multiple selectors within a single round.
     """
 
     metadata = {"render_modes": ["rgb_array"]}
@@ -69,6 +66,7 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
         self.is_multiagent = True
 
         self._all_false = [False for _ in range(self.num_agents)]
+        self._all_true = [True for _ in range(self.num_agents)]
         self._round = 0
         self._last_actions = np.zeros((self.num_agents,), dtype=np.int8)  # 0: none, 1: C, 2: D
         self._action_history = np.zeros((self.num_agents, self.history_h), dtype=np.int8)
@@ -78,13 +76,7 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
         self._partners = np.zeros((self.num_agents,), dtype=np.int32)
         self._pending_partners: Optional[np.ndarray] = None
 
-        # Round-local state.
-        self._round_initialized = False
-        self._interaction_cursor = 0
-        self._round_selector_actions = np.full((self.num_agents,), -1, dtype=np.int8)
-        self._round_pair_actions = np.full((self.num_agents, self.num_agents), -1, dtype=np.int8)
         self._round_interaction_counts = np.ones((self.num_agents,), dtype=np.int32)
-        self._next_active = (0, 1)
 
         self.is_terminated = True
 
@@ -110,6 +102,11 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
         # Applied at the next round boundary.
         self._pending_partners = self._validate_partners(partners)
 
+    def _interaction_counts_for(self, partners: np.ndarray) -> np.ndarray:
+        interaction_counts = np.ones((self.num_agents,), dtype=np.int32)
+        np.add.at(interaction_counts, partners, 1)
+        return interaction_counts
+
     def _encode_action_history(self, history_codes: np.ndarray) -> np.ndarray:
         features = np.zeros((2 * self.history_h,), dtype=np.float32)
         for lag in range(self.history_h):
@@ -120,25 +117,11 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
                 features[2 * lag + 1] = 1.0
         return features
 
-    def _active_pair(self) -> tuple[int, int]:
-        selector = int(self._interaction_cursor)
-        partner = int(self._partners[selector])
-        return selector, partner
-
     def _build_observations(self) -> list[dict[str, np.ndarray]]:
-        selector, partner = self._next_active
-        zero = np.zeros((2 * self.history_h,), dtype=np.float32)
-
         obs: list[dict[str, np.ndarray]] = []
         for agent_idx in range(self.num_agents):
-            if agent_idx == selector:
-                opponent_idx = partner
-                obs_vec = self._encode_action_history(self._action_history[opponent_idx]).astype(np.float32)
-            elif agent_idx == partner:
-                opponent_idx = selector
-                obs_vec = self._encode_action_history(self._action_history[opponent_idx]).astype(np.float32)
-            else:
-                obs_vec = zero.copy()
+            opponent_idx = int(self._partners[agent_idx])
+            obs_vec = self._encode_action_history(self._action_history[opponent_idx]).astype(np.float32)
             obs.append({"obs": obs_vec})
         return obs
 
@@ -156,31 +139,9 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
         self._action_history[:, :] = 0
         self._episode_returns[:] = 0.0
         self._pending_partners = None
-
-        self._round_initialized = False
-        self._interaction_cursor = 0
-        self._round_selector_actions[:] = -1
-        self._round_pair_actions[:, :] = -1
         self._round_interaction_counts[:] = 1
-        self._next_active = (0, 1)
 
         self.is_terminated = False
-
-    def _begin_round(self) -> None:
-        if self._pending_partners is not None:
-            self._partners = self._pending_partners
-            self._pending_partners = None
-        elif self._round > 0 and self.partner_scheduler == "random_with_replacement_each_step":
-            self._partners = self._sample_partners()
-
-        self._interaction_cursor = 0
-        self._round_selector_actions[:] = -1
-        self._round_pair_actions[:, :] = -1
-        self._round_interaction_counts[:] = 1
-        np.add.at(self._round_interaction_counts, self._partners, 1)
-
-        self._round_initialized = True
-        self._next_active = self._active_pair()
 
     def reset(self, seed: int | None = None, options: dict | None = None):
         if seed is not None:
@@ -195,17 +156,15 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
         else:
             raise ValueError(f"Unsupported partner scheduler: {self.partner_scheduler}")
 
-        self._begin_round()
+        self._round_interaction_counts = self._interaction_counts_for(self._partners)
 
         observations = self._build_observations()
-        selector, _ = self._next_active
-        partner_preview = int(self._partners[selector])
         infos = [
             {
-                "selected_partner": int(partner_preview if agent_idx == selector else self._partners[agent_idx]),
-                "played_partner": int(partner_preview if agent_idx == selector else self._partners[agent_idx]),
+                "selected_partner": int(self._partners[agent_idx]),
+                "played_partner": int(self._partners[agent_idx]),
                 "interaction_count": int(self._round_interaction_counts[agent_idx]),
-                "is_active": bool(agent_idx in self._next_active),
+                "is_active": True,
             }
             for agent_idx in range(self.num_agents)
         ]
@@ -217,93 +176,50 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
             rewards = [np.float32(0.0) for _ in range(self.num_agents)]
             return obs, rewards, list(self._all_false), list(self._all_false), infos
 
-        if not self._round_initialized:
-            self._begin_round()
-
         action_array = self._validate_actions(actions)
-        selector, partner = self._active_pair()
-
-        selector_action = int(action_array[selector])
-        partner_action = int(action_array[partner])
-        payoff = self.core.payoff
-
-        rewards_array = np.zeros((self.num_agents,), dtype=np.float32)
-        rewards_array[selector] += np.float32(payoff[selector_action, partner_action])
-        rewards_array[partner] += np.float32(payoff[partner_action, selector_action])
+        played_partners = self._partners.copy()
+        rewards_array, interaction_counts = self.core.compute_round_rewards(action_array, played_partners)
         self._episode_returns += rewards_array
 
-        self._round_selector_actions[selector] = selector_action
-        self._round_pair_actions[selector, partner] = selector_action
-        self._round_pair_actions[partner, selector] = partner_action
+        # History stores one selector-side action per agent per round.
+        self._last_actions = action_array + 1
+        if self.history_h > 1:
+            self._action_history[:, 1:] = self._action_history[:, :-1]
+        self._action_history[:, 0] = self._last_actions
 
-        self._interaction_cursor += 1
-        round_finished = self._interaction_cursor >= self.num_agents
-
-        if round_finished:
-            # History stores one selector-side action per agent per round.
-            self._last_actions = self._round_selector_actions + 1
-            if self.history_h > 1:
-                self._action_history[:, 1:] = self._action_history[:, :-1]
-            self._action_history[:, 0] = self._last_actions
-
-            self._round += 1
-            terminated = self._round >= self.max_steps
-            self.is_terminated = terminated
-
-            if terminated:
-                self._next_active = (0, 1)
-            else:
-                # Next step starts a new round; partner override (if any) is consumed there.
-                self._round_initialized = False
-                if self._pending_partners is not None:
-                    next_partners = self._pending_partners
-                elif self.partner_scheduler == "random_with_replacement_each_step":
-                    next_partners = self._sample_partners()
-                else:
-                    next_partners = self._partners
-                next_selector = 0
-                next_partner = int(next_partners[next_selector])
-                self._next_active = (next_selector, next_partner)
-        else:
-            terminated = False
-            self.is_terminated = False
-            self._next_active = self._active_pair()
-
-        observations = self._build_observations()
-        rewards = [np.float32(value) for value in rewards_array]
-        terminations = [terminated for _ in range(self.num_agents)]
-        truncations = [terminated for _ in range(self.num_agents)]
+        self._round += 1
+        terminated = self._round >= self.max_steps
+        self.is_terminated = terminated
 
         infos: list[dict] = []
         for i in range(self.num_agents):
-            partner_i = int(self._partners[i])
-
-            if round_finished:
-                selector_last = int(self._round_selector_actions[i])
-                partner_last = int(self._round_pair_actions[partner_i, i])
-            elif i == selector:
-                selector_last = selector_action
-                partner_last = partner_action
-            elif i == partner:
-                selector_last = partner_action
-                partner_last = selector_action
-            else:
-                selector_last = -1
-                partner_last = -1
-
+            partner_i = int(played_partners[i])
             infos.append(
                 {
                     "true_objective": np.asarray(self._episode_returns[i], dtype=np.float32),
                     "played_partner": partner_i,
                     "selected_partner": partner_i,
-                    "interaction_count": int(self._round_interaction_counts[i]),
+                    "interaction_count": int(interaction_counts[i]),
                     "episode_extra_stats": {
-                        "last_action": int(selector_last),
-                        "partner_last_action": int(partner_last),
+                        "last_action": int(action_array[i]),
+                        "partner_last_action": int(action_array[partner_i]),
                     },
-                    "is_active": bool(i in self._next_active) if not terminated else False,
+                    "is_active": False if terminated else True,
                 }
             )
+
+        if not terminated:
+            if self._pending_partners is not None:
+                self._partners = self._pending_partners
+                self._pending_partners = None
+            elif self.partner_scheduler == "random_with_replacement_each_step":
+                self._partners = self._sample_partners()
+            self._round_interaction_counts = self._interaction_counts_for(self._partners)
+
+        observations = self._build_observations()
+        rewards = [np.float32(value) for value in rewards_array]
+        terminations = [terminated for _ in range(self.num_agents)]
+        truncations = [terminated for _ in range(self.num_agents)]
 
         return observations, rewards, terminations, truncations, infos
 

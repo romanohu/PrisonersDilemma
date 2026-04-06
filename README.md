@@ -77,12 +77,12 @@ obs, rewards, terminations, truncations, infos = env.step([0, 1])
 - `PopulationPrisonersDilemmaEnv` action space is also `Discrete(2)` per agent:
   - each agent outputs one C/D action at every environment step
 - Population step/round semantics:
-  - one environment step processes one directed interaction
-  - one round consists of `num_agents` directed interactions (`i -> partners[i]` for all `i`)
-  - if agent `j` is selected by multiple selectors in a round, `j` is queried multiple
-    times (once per interaction), so responses can differ by selector while keeping C/D action space
-- Observation in population env is partner-action history for the next active interaction,
-  shape `(2 * history_h)`.
+  - one environment step processes one full round
+  - one round contains `num_agents` directed interactions (`i -> partners[i]` for all `i`)
+  - if agent `j` is selected by multiple selectors, selected-side rewards are accumulated in the same step
+  - each agent outputs one action per step, reused across all incoming interactions in that step
+- Observation in population env is partner-action history for each agent's selected partner,
+  shape `(2 * history_h)` (all agents active on non-terminal steps).
 - History update detail:
   - the history stored for agent `i` at round `t` is the selector-side action used in
     `i -> partners[i]` in that round
@@ -93,8 +93,8 @@ obs, rewards, terminations, truncations, infos = env.step([0, 1])
   - `partner_scheduler="random_with_replacement_each_step"`
 - Scheduler behavior:
   - `random_with_replacement`: partners are sampled at `reset` and fixed unless overridden.
-  - `random_with_replacement_each_step`: partners are resampled at each round boundary.
-- `set_partners(...)` overrides the partner assignment at the next round boundary.
+  - `random_with_replacement_each_step`: partners are resampled for the next step round.
+- `set_partners(...)` stores a pending override that takes effect on the following step.
 - If `step` is called after termination, env auto-resets and returns zero rewards with non-terminal flags.
 
 See `docs/environment_api.md` for complete transition semantics and info fields.

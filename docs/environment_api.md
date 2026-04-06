@@ -75,8 +75,7 @@ PopulationPrisonersDilemmaEnv(
 - `observation_space = Dict({"obs": Box(shape=(2 * history_h,), dtype=float32)})`
   - At each environment step, observation is the one-hot history of the
     *current interaction opponent* for that agent.
-  - Inactive agents receive a zero observation and are marked via
-    `infos[i]["is_active"] = False`.
+  - In population mode, all agents are active on non-terminal steps.
 
 - `action_space = Discrete(2)` per agent
   - `0`: Cooperate (`C`)
@@ -109,18 +108,18 @@ resamples partners at every non-terminal round boundary.
 `set_partners(partners)`:
 
 - validates with the same constraints as `options["partners"]`
-- updates partner assignment at the next round boundary (useful for external policy-mapping control)
+- stores assignment as pending override for the next round (next env step)
 
 ### Partner Assignment Timing (with external controller)
 
 When this environment is controlled by an external partner-selection module:
 
-1. `set_partners(...)` does not immediately replace the current round assignment.
+1. `set_partners(...)` does not immediately replace the current step's assignment.
 2. It stores the assignment as a pending value.
-3. The pending value is consumed only at `_begin_round()`.
-4. If `set_partners(...)` is called multiple times before `_begin_round()`, the latest call overwrites earlier pending values.
+3. The pending value is consumed after current-step round processing and becomes the partner assignment of the next step.
+4. If `set_partners(...)` is called multiple times before the next step starts, the latest call overwrites earlier pending values.
 
-Operationally, this means one round runs with one fixed assignment, and the assignment is decided at round start from the latest pending value available at that moment.
+Operationally, this means one step runs with one fixed assignment, and external updates take effect on the following step.
 
 ### `step(actions)`
 
@@ -131,35 +130,30 @@ Input:
 
 State transition:
 
-1. One environment step processes one directed interaction in the current round.
-2. Let the active interaction be `selector=i`, `partner=j=partners[i]`.
-3. Use action `a_i` from selector agent `i` and action `a_j` from partner agent `j`.
-4. Apply directed PD payoff:
+1. One environment step processes one full round of directed interactions.
+2. For every selector `i`, run interaction `i -> j` where `j=partners[i]`.
+3. Each agent outputs one C/D action in the step; that same action is reused for all incoming interactions in that step.
+4. Apply directed PD payoff for all selectors:
    - selector reward `+= payoff[a_i, a_j]`
    - selected reward `+= payoff[a_j, a_i]`
-5. Repeat over environment steps until all selectors `i=0..num_agents-1` are processed:
-   - this completes one round
-   - update per-agent latest selector action and history (one action per agent per round)
+5. Update per-agent latest selector action and history (one action per agent per round/step).
 6. Set terminal flags when completed rounds reach `max_steps`.
 7. If scheduler is `"random_with_replacement_each_step"` and episode is not
-   terminated, sample partners for the next round.
+   terminated, sample partners for the next round (next step).
 
 Note:
 
 - `infos[i]["selected_partner"]` / `infos[i]["played_partner"]` always refer to
-  the current round's selected partner for agent `i`.
+  the current step round's selected partner for agent `i`.
 - `episode_extra_stats.last_action` is the selector action used in agent `i`'s
   own directed interaction `i -> partners[i]` (for the round summary).
-- If agent `j` is selected by multiple selectors in one round, `j` is queried
-  multiple times across round interactions, so responses can differ per selector.
-- Selected-side rewards from incoming interactions are accumulated in the same
-  episode return of agent `j`.
+- If agent `j` is selected by multiple selectors in one round, selected-side
+  rewards from all incoming interactions are accumulated in the same step reward of `j`.
+- In that case, `j` still uses one action for the whole step.
 - Action history update stores only one action per agent per step:
   the selector-side action from that agent's own directed interaction in the round
   `i -> partners[i]`.
-- `infos[i]["is_active"]` indicates whether agent `i` is active for the next
-  interaction step.
-- For agents with `is_active=False`, observation is a zero vector for that step.
+- `infos[i]["is_active"]` is `True` for all agents on non-terminal steps.
 
 Per-agent `infos[i]` includes:
 
