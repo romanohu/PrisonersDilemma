@@ -14,12 +14,9 @@ The implementation is split into two layers:
 
 Shared conventions:
 
-- Action space: `Discrete(2)`
+- Action values use binary PD coding:
   - `0`: Cooperate (`C`)
   - `1`: Defect (`D`)
-- Observation space:
-  - `Dict({"obs": Box(shape=(2 * history_h,), dtype=float32)})`
-  - Encodes partner action history as one-hot features.
 - `reset(...)` returns `(observations, infos)`
 - `step(actions)` returns:
   - `(observations, rewards, terminations, truncations, infos)`
@@ -73,6 +70,18 @@ PopulationPrisonersDilemmaEnv(
   - `"random_with_replacement"`
   - `"random_with_replacement_each_step"`
 
+### Observation and Action Spaces
+
+- `observation_space = Dict({"obs": Box(shape=(2 * history_h * (num_agents - 1),), dtype=float32)})`
+  - For each agent, observation concatenates one-hot action-history vectors of
+    all other agents (ascending id order, excluding self).
+
+- `action_space = MultiDiscrete([2] * (num_agents - 1))`
+  - Each agent outputs one C/D action per possible opponent (excluding self).
+  - Column order matches the same ascending-opponent order as observation.
+  - Backward-compatible input shape `(num_agents,)` is also accepted and
+    broadcast to every opponent column.
+
 ### Partner Assignment
 
 Partners are represented by an internal directed assignment vector where each
@@ -106,28 +115,34 @@ resamples partners every non-terminal `step`.
 
 Input:
 
-- iterable of length `num_agents`
-- each action in `{0, 1}`
+- iterable shaped either:
+  - `(num_agents, num_agents - 1)` for per-opponent actions
+  - `(num_agents,)` (legacy broadcast mode)
+- each action value in `{0, 1}`
 
 State transition:
 
 1. Apply directed interactions `i -> partners[i]` for all `i`.
-2. Compute rewards via `PairwisePrisonersDilemmaCore.compute_round_rewards`.
-3. Update:
+2. For each directed interaction `i -> j`, use:
+   - selector action: agent `i`'s action column for opponent `j`
+   - partner response: agent `j`'s action column for opponent `i`
+3. Accumulate directed PD rewards across all interactions.
+4. Update:
    - episode step count
    - per-agent latest action and action history
    - per-agent cumulative return
-4. Set terminal flags when `step >= max_steps`.
-5. If scheduler is `"random_with_replacement_each_step"` and episode is not
+5. Set terminal flags when `step >= max_steps`.
+6. If scheduler is `"random_with_replacement_each_step"` and episode is not
    terminated, sample partners for the next step.
 
 Note:
 
 - `infos[i]["selected_partner"]` / `infos[i]["played_partner"]` always refer to
   the partner used for reward computation in the current step.
-- `observations` are built from the environment's current partner assignment
-  after transition updates (which may already be the next-step partner when
-  using `"random_with_replacement_each_step"`).
+- `episode_extra_stats.last_action` is the selector action used in agent `i`'s
+  own directed interaction `i -> partners[i]`.
+- `observations` contain all-other-agent histories and are independent of the
+  currently selected partner ids.
 
 Per-agent `infos[i]` includes:
 

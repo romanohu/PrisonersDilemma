@@ -37,8 +37,14 @@ env = PopulationPrisonersDilemmaEnv(
 )
 
 obs, infos = env.reset(seed=7)
-actions = [0] * env.num_agents  # 0 = C, 1 = D
+actions = [0] * env.num_agents  # backward-compatible shortcut (broadcast to all opponents)
 obs, rewards, terminations, truncations, infos = env.step(actions)
+
+# per-opponent actions (row i has actions vs every opponent except i)
+actions_per_opponent = [
+    [0] * (env.num_agents - 1) for _ in range(env.num_agents)
+]
+obs, rewards, terminations, truncations, infos = env.step(actions_per_opponent)
 ```
 
 You can also pass explicit partners at reset:
@@ -71,10 +77,14 @@ obs, rewards, terminations, truncations, infos = env.step([0, 1])
 
 ## Current Behavior Notes
 
-- Action space is `Discrete(2)` for both envs:
+- `PrisonersDilemmaEnv` action space is `Discrete(2)`:
   - `0`: Cooperate (`C`)
   - `1`: Defect (`D`)
-- Observation is partner-action history encoded as one-hot features of shape `(2 * history_h,)`.
+- `PopulationPrisonersDilemmaEnv` action space is `MultiDiscrete([2] * (num_agents - 1))`:
+  - each agent outputs one C/D action per possible opponent (excluding self)
+  - legacy input `[a_0, ..., a_{N-1}]` is still accepted and broadcast per opponent
+- Observation in population env is all-other-agents action history, shape
+  `(2 * history_h * (num_agents - 1))`.
 - `PopulationPrisonersDilemmaEnv` supports:
   - `partner_scheduler="random_with_replacement"`
   - `partner_scheduler="random_with_replacement_each_step"`
