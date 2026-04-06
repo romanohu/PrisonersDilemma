@@ -17,6 +17,7 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
     """
 
     metadata = {"render_modes": ["rgb_array"]}
+    _SUPPORTED_PARTNER_SCHEDULERS = {"random_with_replacement", "random_with_replacement_each_step"}
 
     def __init__(
         self,
@@ -39,7 +40,7 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
             raise ValueError(f"max_steps must be positive, got {max_steps}")
         if self.history_h <= 0:
             raise ValueError(f"history_h must be positive, got {history_h}")
-        if self.partner_scheduler != "random_with_replacement":
+        if self.partner_scheduler not in self._SUPPORTED_PARTNER_SCHEDULERS:
             raise ValueError(f"Unsupported partner_scheduler: {partner_scheduler}")
 
         self.core = PairwisePrisonersDilemmaCore(payoff_matrix=payoff_matrix)
@@ -85,6 +86,9 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
             raise ValueError("Self-partnering is not allowed (partners[i] must be != i)")
         return partner_array
 
+    def set_partners(self, partners: Iterable[int]) -> None:
+        self._partners = self._validate_partners(partners)
+
     def _encode_action_history(self, history_codes: np.ndarray) -> np.ndarray:
         features = np.zeros((2 * self.history_h,), dtype=np.float32)
         for lag in range(self.history_h):
@@ -125,8 +129,8 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
 
         options = options or {}
         if "partners" in options:
-            self._partners = self._validate_partners(options["partners"])
-        elif self.partner_scheduler == "random_with_replacement":
+            self.set_partners(options["partners"])
+        elif self.partner_scheduler in self._SUPPORTED_PARTNER_SCHEDULERS:
             self._partners = self._sample_partners()
         else:
             raise ValueError(f"Unsupported partner scheduler: {self.partner_scheduler}")
@@ -154,6 +158,9 @@ class PopulationPrisonersDilemmaEnv(gym.Env):
 
         terminated = self._step >= self.max_steps
         self.is_terminated = terminated
+
+        if self.partner_scheduler == "random_with_replacement_each_step" and not terminated:
+            self._partners = self._sample_partners()
 
         observations = self._build_observations()
         rewards = [np.float32(value) for value in rewards_array]
