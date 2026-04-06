@@ -72,15 +72,15 @@ PopulationPrisonersDilemmaEnv(
 
 ### Observation and Action Spaces
 
-- `observation_space = Dict({"obs": Box(shape=(2 * history_h * (num_agents - 1),), dtype=float32)})`
-  - For each agent, observation concatenates one-hot action-history vectors of
-    all other agents (ascending id order, excluding self).
+- `observation_space = Dict({"obs": Box(shape=(2 * history_h,), dtype=float32)})`
+  - At each environment step, observation is the one-hot history of the
+    *current interaction opponent* for that agent.
+  - Inactive agents receive a zero observation and are marked via
+    `infos[i]["is_active"] = False`.
 
-- `action_space = MultiDiscrete([2] * (num_agents - 1))`
-  - Each agent outputs one C/D action per possible opponent (excluding self).
-  - Column order matches the same ascending-opponent order as observation.
-  - Backward-compatible input shape `(num_agents,)` is also accepted and
-    broadcast to every opponent column.
+- `action_space = Discrete(2)` per agent
+  - `0`: Cooperate (`C`)
+  - `1`: Defect (`D`)
 
 ### Partner Assignment
 
@@ -104,52 +104,50 @@ Sampling rule for `"random_with_replacement"`:
 - the same partner can be sampled by multiple agents
 
 `"random_with_replacement_each_step"` uses the same sampling rule, but it
-resamples partners every non-terminal `step`.
+resamples partners at every non-terminal round boundary.
 
 `set_partners(partners)`:
 
 - validates with the same constraints as `options["partners"]`
-- updates partner assignment immediately (useful for external policy-mapping control)
+- updates partner assignment at the next round boundary (useful for external policy-mapping control)
 
 ### `step(actions)`
 
 Input:
 
-- iterable shaped either:
-  - `(num_agents, num_agents - 1)` for per-opponent actions
-  - `(num_agents,)` (legacy broadcast mode)
+- iterable shaped `(num_agents,)`
 - each action value in `{0, 1}`
 
 State transition:
 
-1. Apply directed interactions `i -> partners[i]` for all `i`.
-2. For each directed interaction `i -> j`, use:
-   - selector action: agent `i`'s action column for opponent `j`
-   - partner response: agent `j`'s action column for opponent `i`
-3. Accumulate directed PD rewards across all interactions.
-4. Update:
-   - episode step count
-   - per-agent latest action and action history
-   - per-agent cumulative return
-5. Set terminal flags when `step >= max_steps`.
-6. If scheduler is `"random_with_replacement_each_step"` and episode is not
-   terminated, sample partners for the next step.
+1. One environment step processes one directed interaction in the current round.
+2. Let the active interaction be `selector=i`, `partner=j=partners[i]`.
+3. Use action `a_i` from selector agent `i` and action `a_j` from partner agent `j`.
+4. Apply directed PD payoff:
+   - selector reward `+= payoff[a_i, a_j]`
+   - selected reward `+= payoff[a_j, a_i]`
+5. Repeat over environment steps until all selectors `i=0..num_agents-1` are processed:
+   - this completes one round
+   - update per-agent latest selector action and history (one action per agent per round)
+6. Set terminal flags when completed rounds reach `max_steps`.
+7. If scheduler is `"random_with_replacement_each_step"` and episode is not
+   terminated, sample partners for the next round.
 
 Note:
 
 - `infos[i]["selected_partner"]` / `infos[i]["played_partner"]` always refer to
-  the partner used for reward computation in the current step.
+  the current round's selected partner for agent `i`.
 - `episode_extra_stats.last_action` is the selector action used in agent `i`'s
-  own directed interaction `i -> partners[i]`.
-- If agent `j` is selected by multiple selectors in one step, `j` can output
-  different responses per selector via per-opponent action columns.
-- Selected-side rewards from those incoming interactions are accumulated in the
-  same step reward of agent `j`.
+  own directed interaction `i -> partners[i]` (for the round summary).
+- If agent `j` is selected by multiple selectors in one round, `j` is queried
+  multiple times across round interactions, so responses can differ per selector.
+- Selected-side rewards from incoming interactions are accumulated in the same
+  episode return of agent `j`.
 - Action history update stores only one action per agent per step:
-  the selector-side action from that agent's own directed interaction
+  the selector-side action from that agent's own directed interaction in the round
   `i -> partners[i]`.
-- `observations` contain all-other-agent histories and are independent of the
-  currently selected partner ids.
+- `infos[i]["is_active"]` indicates whether agent `i` is active for the next
+  interaction step.
 
 Per-agent `infos[i]` includes:
 
