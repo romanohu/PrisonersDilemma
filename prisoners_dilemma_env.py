@@ -26,7 +26,7 @@ class PrisonersDilemmaEnv(gym.Env):
         *,
         num_agents: int = 2,
         max_steps: int = 150,
-        payoff_matrix: Sequence[Sequence[float]] = ((3.0, 0.0), (5.0, 1.0)),
+        payoff_matrix: Sequence[Sequence[float]] = ((3.0, 0.0), (4.0, 1.0)),
         history_h: int = 1,
         seed: int = 0,
     ):
