@@ -108,8 +108,8 @@ class PrisonersDilemmaEnv(gym.Env):
         self._env_total_reward = 0.0
         self.is_terminated = False
 
-    def reset(self, seed: int | None = None, options: dict | None = None):
-        del options
+    def reset(self, seed: int | None = None, **kwargs):
+        del kwargs
         if seed is not None:
             self._rng = np.random.default_rng(int(seed))
         self._reset_state()
