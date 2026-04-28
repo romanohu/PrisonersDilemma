@@ -1,144 +1,213 @@
 # Environment API and Transition Semantics
 
-This document describes the API for:
+このドキュメントは、現在リポジトリで公開している以下の環境APIをまとめたものです。
 
+- `PairwisePrisonersDilemmaCore`
+- `PrisonersDilemmaEnv`（2-agent）
 - `PopulationPrisonersDilemmaEnv`
+- `PairedPopulationPrisonersDilemmaEnv`
 
-## Shared Core
+## 1. Shared Conventions
 
-The implementation is split into two layers:
-
-1. Reward core: `PairwisePrisonersDilemmaCore`
-2. Gymnasium wrapper: `PopulationPrisonersDilemmaEnv`
-
-Shared conventions:
-
-- PD action values:
+- PD action code:
   - `0`: Cooperate (`C`)
   - `1`: Defect (`D`)
-- `reset(...)` returns `(observations, infos)`
-- `step(actions)` returns:
-  - `(observations, rewards, terminations, truncations, infos)`
-- After termination, calling `step(...)` auto-resets and returns:
-  - zero rewards
-  - all `False` for `terminations` and `truncations`
+- Gymnasium I/O:
+  - `reset(...) -> (observations, infos)`
+  - `step(actions) -> (observations, rewards, terminations, truncations, infos)`
 
-## Reward Core (`PairwisePrisonersDilemmaCore`)
+## 2. Reward Core
 
-Constructor:
+### `PairwisePrisonersDilemmaCore`
 
 ```python
 PairwisePrisonersDilemmaCore(
-    payoff_matrix=((3.0, 0.0), (5.0, 1.0)),
+    payoff_matrix=((3.0, 0.0), (4.0, 1.0)),
 )
 ```
 
-- `payoff_matrix` must be shape `(2, 2)`.
+- `payoff_matrix` は shape `(2, 2)` 必須。
+- directed interaction `i -> j` の報酬:
+  - selector reward: `payoff[a_i, a_j]`
+  - selected reward: `payoff[a_j, a_i]`
 
-For one directed interaction `i -> j`:
+`compute_round_rewards(actions, partners)`:
+- `actions`: shape `(N,)`, 各要素 `0/1`
+- `partners`: shape `(N,)`, `partners[i] != i`
+- returns:
+  - `rewards`: shape `(N,)`, `float32`
+  - `interaction_counts`: shape `(N,)`, `int32`
 
-- selector reward: `payoff[a_i, a_j]`
-- selected reward: `payoff[a_j, a_i]`
+## 3. `PrisonersDilemmaEnv` (2-agent)
 
-## `PopulationPrisonersDilemmaEnv`
+### Constructor
+
+```python
+PrisonersDilemmaEnv(
+    num_agents=2,
+    max_steps=150,
+    payoff_matrix=((3.0, 0.0), (4.0, 1.0)),
+    history_h=1,
+    seed=0,
+)
+```
+
+- `num_agents` は `2` 固定（それ以外は `ValueError`）。
+- action space: `Discrete(2)`（`0:C`, `1:D`）
+- observation space: `Dict({"obs": Box(shape=(2*history_h,), dtype=float32)})`
+  - 相手の過去行動履歴を one-hot 化
+  - 未観測 (`-1`) はゼロ埋め
+
+### Step Semantics
+
+- 1 step = 1回の2人PD対戦。
+- `max_steps` 到達で `terminated=True` / `truncated=True`（全agent同値）。
+- 終了後に `step(...)` が呼ばれた場合:
+  - 自動 `reset()` して
+  - `rewards=0`, `terminations=False`, `truncations=False` を返す。
+
+### Infos
+
+各 `infos[i]` に主に以下を含む:
+- `true_objective`
+- `played_partner`
+- `selected_partner`
+- `interaction_count`
+- `episode_extra_stats.*`（協調/裏切り回数・比率など）
+
+## 4. `PopulationPrisonersDilemmaEnv`
 
 ### Constructor
 
 ```python
 PopulationPrisonersDilemmaEnv(
-    num_agents: int = 8,
-    max_steps: int = 150,
+    num_agents=8,
+    max_steps=150,
     payoff_matrix=((3.0, 0.0), (5.0, 1.0)),
-    history_h: int = 1,
-    seed: int = 0,
-    partner_scheduler: str = "from_actions",
+    history_h=1,
+    seed=0,
+    partner_scheduler="from_actions",
 )
 ```
 
-### Parameters
+- `partner_scheduler`:
+  - `"from_actions"`: partner head を使用
+  - `"random"`: ランダムマッチング
+  - 互換エイリアス:
+    - `"random_with_replacement"`
+    - `"random_with_replacement_each_step"`
 
-- `num_agents`: must be `>= 2`
-- `max_steps`: number of rounds per episode (`> 0`)
-- `history_h`: observation history length (`> 0`)
-- `payoff_matrix`: 2x2 matrix
-- `seed`: RNG seed
-- `partner_scheduler`: partner matching mode
-  - `from_actions`: use partner head choices at each round
-  - `random`: random partner sampling at each round boundary
+### Observation / Action
 
-Compatibility aliases `random_with_replacement` and `random_with_replacement_each_step` are normalized to `random`.
+- action space: `Tuple(Discrete(num_agents-1), Discrete(2))`
+  - head0: 相対 partner id
+  - head1: PD action
+- observation space:
+  - `Dict({"obs": Box(shape=((num_agents-1)*2*history_h + 1,), dtype=float32)})`
+  - 末尾1要素は phase flag:
+    - `0.0`: selection
+    - `1.0`: dilemma
+  - dilemma中は「現在対戦中の2agentだけ」相手履歴スロットが埋まり、他はゼロ。
 
-### Observation and Action Spaces
+### Round / Step Semantics
 
-- `observation_space = Dict({"obs": Box(shape=((num_agents - 1) * 2 * history_h + 1,), dtype=float32)})`
-  - base part: concatenated one-hot PD histories of all other agents
-  - last scalar: phase flag (`0.0=round boundary`, `1.0=dilemma`)
-  - unknown history (`-1`) is encoded as all zeros in that slot
-  - in dilemma phase, only currently interacting pair slots are populated; non-participants are zeros
+1 round は `num_agents` step:
+1. round-start step:
+  - partner map 決定
+  - selector `0 -> partner[0]` を同stepで実行
+2. 残り `num_agents-1` step:
+  - selector `1..num_agents-1` を順に実行
 
-- `action_space = Tuple(Discrete(num_agents - 1), Discrete(2))` per agent
-  - head 0 (`partner`): relative partner id among other agents
-  - head 1 (`pd`): PD action (`0:C`, `1:D`)
+`max_steps` は「round数」の上限。
 
-Relative partner decoding for agent `i`:
+### Post-Termination Behavior
 
-- if `partner_rel < i` then `partner_abs = partner_rel`
-- else `partner_abs = partner_rel + 1`
+- 終了後に `step(...)` が呼ばれた場合は自動 `reset()`（Sample Factory互換挙動）。
 
-### Partner Overrides
+### Infos
 
-`set_partners(partners)`:
+`step` の `infos[i]` には以下を含む:
+- `true_objective`
+- `played_partner`
+- `selected_partner`
+- `interaction_count`
+- `episode_extra_stats.*`
+- `is_active`（終端stepのみ `False`）
 
-- validates:
-  - shape `(num_agents,)`
-  - each id in `[0, num_agents)`
-  - no self-partnering
-- applies at the next round boundary (phase `0.0`), then clears
+`reset()` 直後の `infos` は preview 用の簡易フィールド中心:
+- `selected_partner`（pending override があればその値）
+- `played_partner=-1`
+- `interaction_count=0`
+- `is_active=True`
 
-`reset(options={"partners": ...})` sets the same pending override.
+## 5. `PairedPopulationPrisonersDilemmaEnv`
 
-### Round and Step Semantics
+### Constructor
 
-One round has exactly `num_agents` env steps:
+```python
+PairedPopulationPrisonersDilemmaEnv(
+    num_agents=8,
+    pd_horizon=32,
+    ema_alpha=0.1,
+    use_opening_signal=False,
+    own_reward_prior=0.0,
+    partner_reward_prior=0.0,
+    payoff_matrix=((3.0, 0.0), (4.0, 1.0)),
+    seed=0,
+)
+```
 
-1. **Round-start step** (phase is `selection` before stepping)
-   - decode all actions
-   - resolve partner map (override / matching mode / partner head)
-   - store partner map for this round
-   - execute selector `0 -> partner[0]` interaction in the same step
-   - transition to dilemma phase
+### Observation / Action
 
-2. **Remaining dilemma steps** (`num_agents - 1` env steps)
-   - each step executes one directed interaction:
-     - selector index advances as `1,2,...,num_agents-1`
-     - selected index is `partner[selector]`
-   - reward uses selector PD action and selected PD action from that step
-   - after last selector, history is committed and round count is incremented
-   - transition back to round-boundary phase (`selection`)
+- observation space:
+  - `selection_obs`: shape `(num_agents-1, 2)`
+  - `pd_obs`: shape `(2,)`
+- `pd_obs` encoding:
+  - `C -> [1,0]`
+  - `D -> [0,1]`
+  - 未観測初期値 -> `[0,0]`
 
-### `infos[i]` Fields
+- action space:
+  - `use_opening_signal=False`:
+    - `(partner_choice_rel, pd_action)`
+  - `use_opening_signal=True`:
+    - `(partner_choice_rel, opening_signal, pd_action)`
 
-Per-agent `infos[i]` contains:
+入力形式は `tuple/list/ndarray` または `dict` の両方を受け付ける。
 
-- `true_objective`: cumulative episode return (`np.float32`)
-- `played_partner`: currently interacted partner id or `-1` (if not interacting this step)
-- `selected_partner`: partner chosen for this round
-- `interaction_count`: `1 + (#times agent i is selected by others in the round)`
-- `episode_extra_stats.last_action`
-- `episode_extra_stats.partner_last_action`
-- `episode_extra_stats.cooperate_count`
-- `episode_extra_stats.defect_count`
-- `episode_extra_stats.cooperate_ratio`
-- `episode_extra_stats.defect_ratio`
-- `episode_extra_stats.selected_count_episode`
-- `episode_extra_stats.env_total_reward`
-- `is_active`
-  - `True` during non-terminal steps
-  - `False` on terminal transition
+### Episode Semantics
 
-## Render
+1 episode:
+1. matching phase を1step（全員 reward=0）
+2. directed match `i -> partner[i]` を全agent分作成
+3. greedy packing（同一slotでagent重複なし）
+4. 各slotを `pd_horizon` step 実行
+5. 全slot終了で episode 終了
 
-`render()` returns an RGB `np.ndarray` frame summarizing:
+補足:
+- `i -> j` と `j -> i` は独立な別試合として扱う。
+- `opening_signal` は最初の `pd_obs` 初期化にのみ使い、報酬/統計に入れない。
 
-- latest committed selector-side action color per agent
-- episode progress bar
+### Phase Metadata (`infos[i]`)
+
+- `phase`: `0=matching`, `1=pd`
+- `can_act`
+- `new_match`
+- `active_opponent_id`（非参加は `-1`）
+- `selected_partner`（絶対ID）
+- `true_objective`
+
+### Non-Participant Rule
+
+- PD phaseで `can_act=False` のagentは遷移・報酬計算に使われない（actionは無視）。
+- ただし `step()` 呼び出し上、action配列自体は全agent分必要。
+
+### Post-Termination Behavior
+
+- 終了後に `step(...)` を呼ぶと `RuntimeError`。
+- 次エピソードへ進むには明示的な `reset()` が必要。
+
+### EMA Stats
+
+- `reset()` ではEMAを保持。
+- `reset_population_stats()` でのみEMAを初期化。

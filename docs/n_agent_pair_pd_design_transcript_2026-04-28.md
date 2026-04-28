@@ -2,6 +2,10 @@
 
 This file records the design discussion history for the new N-agent pair PD environment.
 
+Note:
+- This document is a historical transcript.
+- For current implementation/API behavior, use `docs/environment_api.md` and `docs/train_construct_method.md` as the source of truth.
+
 ## User request and scope
 
 **User:** `$grill-me` for a new MARL environment for N-agent pair PD with two phases:
@@ -195,4 +199,3 @@ User indicated external stack strategy:
 User requested:
 1. Save this discussion history into one markdown file.
 2. Then start implementation.
-
