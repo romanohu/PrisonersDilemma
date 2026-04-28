@@ -140,104 +140,6 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
         self._new_match = np.zeros((self.num_agents,), dtype=np.bool_)
         self._active_opponents = np.full((self.num_agents,), -1, dtype=np.int32)
 
-    def _decode_relative_partner(self, agent_idx: int, partner_rel: int) -> int:
-        if partner_rel < 0 or partner_rel >= self.num_agents - 1:
-            raise ValueError(
-                f"Invalid relative partner id {partner_rel} for agent {agent_idx}, "
-                f"expected [0, {self.num_agents - 2}]"
-            )
-        return partner_rel if partner_rel < agent_idx else partner_rel + 1
-
-    def _extract_action(self, agent_idx: int, action_entry) -> tuple[int, int, int]:
-        if isinstance(action_entry, dict):
-            if "partner" not in action_entry:
-                raise ValueError(f"Action dict for agent {agent_idx} must contain 'partner': {action_entry}")
-            if "pd" not in action_entry:
-                raise ValueError(f"Action dict for agent {agent_idx} must contain 'pd': {action_entry}")
-            partner_raw = action_entry["partner"]
-            pd_raw = action_entry["pd"]
-            opening_raw = action_entry.get("opening", 0)
-        elif isinstance(action_entry, (tuple, list, np.ndarray)):
-            if self.use_opening_signal:
-                if len(action_entry) != 3:
-                    raise ValueError(
-                        f"Expected 3 action heads (partner, opening, pd) for agent {agent_idx}, got {action_entry}"
-                    )
-                partner_raw, opening_raw, pd_raw = action_entry
-            else:
-                if len(action_entry) != 2:
-                    raise ValueError(f"Expected 2 action heads (partner, pd) for agent {agent_idx}, got {action_entry}")
-                partner_raw, pd_raw = action_entry
-                opening_raw = 0
-        else:
-            raise ValueError(
-                f"Unsupported action format for agent {agent_idx}: {type(action_entry)}. "
-                "Expected dict or tuple/list."
-            )
-
-        partner_rel = int(partner_raw)
-        opening_signal = int(opening_raw)
-        pd_action = int(pd_raw)
-
-        if opening_signal not in (0, 1):
-            raise ValueError(f"Unsupported opening signal {opening_signal} for agent {agent_idx}, expected 0/1")
-        if pd_action not in (0, 1):
-            raise ValueError(f"Unsupported PD action {pd_action} for agent {agent_idx}, expected 0/1")
-
-        return partner_rel, opening_signal, pd_action
-
-    def _parse_actions(self, actions: Iterable) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        action_list = list(actions)
-        if len(action_list) != self.num_agents:
-            raise ValueError(f"Expected {self.num_agents} actions, got {len(action_list)}")
-
-        partners_abs = np.zeros((self.num_agents,), dtype=np.int32)
-        opening_signals = np.zeros((self.num_agents,), dtype=np.int8)
-        pd_actions = np.zeros((self.num_agents,), dtype=np.int8)
-
-        for agent_idx, action_entry in enumerate(action_list):
-            partner_rel, opening_signal, pd_action = self._extract_action(agent_idx, action_entry)
-            partners_abs[agent_idx] = self._decode_relative_partner(agent_idx, partner_rel)
-            opening_signals[agent_idx] = np.int8(opening_signal)
-            pd_actions[agent_idx] = np.int8(pd_action)
-
-        return partners_abs, opening_signals, pd_actions
-
-    def _build_matches(self, partners_abs: np.ndarray) -> list[_DirectedMatchState]:
-        matches: list[_DirectedMatchState] = []
-        for selector_idx in range(self.num_agents):
-            matches.append(
-                _DirectedMatchState(
-                    selector=selector_idx,
-                    opponent=int(partners_abs[selector_idx]),
-                )
-            )
-        return matches
-
-    def _pack_matches_greedy(self, matches: list[_DirectedMatchState]) -> list[list[int]]:
-        """Pack directed matches into slots so no agent appears twice in a slot."""
-        slots: list[list[int]] = []
-        used_agents_per_slot: list[set[int]] = []
-
-        for match_idx, match in enumerate(matches):
-            placed = False
-            for slot_idx, used_agents in enumerate(used_agents_per_slot):
-                if match.selector in used_agents or match.opponent in used_agents:
-                    continue
-                slots[slot_idx].append(match_idx)
-                used_agents.add(match.selector)
-                used_agents.add(match.opponent)
-                placed = True
-                break
-
-            if placed:
-                continue
-
-            slots.append([match_idx])
-            used_agents_per_slot.append({match.selector, match.opponent})
-
-        return slots
-
     @staticmethod
     def _encode_pd_action(action_code: int) -> np.ndarray:
         encoded = np.zeros((2,), dtype=np.float32)
@@ -247,29 +149,19 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
             encoded[1] = 1.0
         return encoded
 
-    def _empty_observation(self) -> dict[str, np.ndarray]:
-        return {
-            "selection_obs": np.zeros((self.num_agents - 1, 2), dtype=np.float32),
-            "pd_obs": np.zeros((2,), dtype=np.float32),
-        }
+    def _set_phase_metadata(self, *, phase: int, new_match: bool = False) -> None:
+        if phase == self.PHASE_MATCHING:
+            self._can_act[:] = True
+            self._new_match[:] = False
+            self._active_opponents[:] = -1
+            return
 
-    def _build_empty_observations(self) -> list[dict[str, np.ndarray]]:
-        return [self._empty_observation() for _ in range(self.num_agents)]
-
-    def _set_matching_metadata(self) -> None:
-        self._can_act[:] = True
-        self._new_match[:] = False
-        self._active_opponents[:] = -1
-
-    def _set_pd_metadata_for_current_slot(self, *, new_match: bool) -> None:
-        # In PD phase we explicitly activate only participants in the current slot.
+        # PD phase: activate only participants in the current slot.
         self._can_act[:] = False
         self._new_match[:] = False
         self._active_opponents[:] = -1
-
         if self._slot_index >= len(self._slots):
             return
-
         for match_idx in self._slots[self._slot_index]:
             match = self._matches[match_idx]
             self._can_act[match.selector] = True
@@ -281,7 +173,13 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
                 self._new_match[match.opponent] = True
 
     def _build_observations(self) -> list[dict[str, np.ndarray]]:
-        observations = self._build_empty_observations()
+        observations = [
+            {
+                "selection_obs": np.zeros((self.num_agents - 1, 2), dtype=np.float32),
+                "pd_obs": np.zeros((2,), dtype=np.float32),
+            }
+            for _ in range(self.num_agents)
+        ]
 
         if self._phase == self.PHASE_MATCHING:
             for agent_idx in range(self.num_agents):
@@ -325,48 +223,40 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
             )
         return infos
 
-    def _update_population_stats(self) -> None:
-        partner_reward_sum = np.zeros((self.num_agents,), dtype=np.float32)
-        partner_reward_count = np.zeros((self.num_agents,), dtype=np.int32)
-
-        for match in self._matches:
-            # For each agent j, track opponents' returns from matches where j participates.
-            partner_reward_sum[match.selector] += np.float32(match.opponent_return)
-            partner_reward_count[match.selector] += 1
-            partner_reward_sum[match.opponent] += np.float32(match.selector_return)
-            partner_reward_count[match.opponent] += 1
-
-        partner_episode_values = np.full((self.num_agents,), self.partner_reward_prior, dtype=np.float32)
-        valid = partner_reward_count > 0
-        partner_episode_values[valid] = partner_reward_sum[valid] / partner_reward_count[valid].astype(np.float32)
-
-        alpha = np.float32(self.ema_alpha)
-        one_minus_alpha = np.float32(1.0) - alpha
-
-        self._ema_own_reward = one_minus_alpha * self._ema_own_reward + alpha * self._episode_returns
-        self._ema_partner_reward_when_present = (
-            one_minus_alpha * self._ema_partner_reward_when_present + alpha * partner_episode_values
-        )
-
-    def _step_matching_phase(
-        self,
-        *,
-        partners_abs: np.ndarray,
-        opening_signals: np.ndarray,
-    ):
+    def _step_selection_phase(self, *, partners_abs: np.ndarray, opening_signals: np.ndarray):
         self._selected_partners = partners_abs.copy()
         if self.use_opening_signal:
             self._opening_signals = opening_signals.copy()
         else:
             self._opening_signals[:] = 0
 
-        self._matches = self._build_matches(self._selected_partners)
-        self._slots = self._pack_matches_greedy(self._matches)
+        self._matches = [
+            _DirectedMatchState(selector=selector_idx, opponent=int(self._selected_partners[selector_idx]))
+            for selector_idx in range(self.num_agents)
+        ]
+
+        # Greedy packing: no agent appears twice in one slot.
+        slots: list[list[int]] = []
+        used_agents_per_slot: list[set[int]] = []
+        for match_idx, match in enumerate(self._matches):
+            placed = False
+            for slot_idx, used_agents in enumerate(used_agents_per_slot):
+                if match.selector in used_agents or match.opponent in used_agents:
+                    continue
+                slots[slot_idx].append(match_idx)
+                used_agents.add(match.selector)
+                used_agents.add(match.opponent)
+                placed = True
+                break
+            if not placed:
+                slots.append([match_idx])
+                used_agents_per_slot.append({match.selector, match.opponent})
+        self._slots = slots
+
         self._slot_index = 0
         self._pd_step_in_slot = 0
-
         self._phase = self.PHASE_PD
-        self._set_pd_metadata_for_current_slot(new_match=True)
+        self._set_phase_metadata(phase=self.PHASE_PD, new_match=True)
 
         observations = self._build_observations()
         rewards = [np.float32(0.0) for _ in range(self.num_agents)]
@@ -375,16 +265,7 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
         infos = self._build_infos()
         return observations, rewards, terminations, truncations, infos
 
-    def _finalize_episode(self) -> None:
-        self._update_population_stats()
-        self._episode_done = True
-        self.is_terminated = True
-        self._phase = self.PHASE_MATCHING
-        self._can_act[:] = False
-        self._new_match[:] = False
-        self._active_opponents[:] = -1
-
-    def _step_pd_phase(self, *, pd_actions: np.ndarray):
+    def _step_game_phase(self, *, pd_actions: np.ndarray):
         rewards_array = np.zeros((self.num_agents,), dtype=np.float32)
         for match_idx in self._slots[self._slot_index]:
             match = self._matches[match_idx]
@@ -410,17 +291,50 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
         episode_done = False
         if self._pd_step_in_slot + 1 < self.pd_horizon:
             self._pd_step_in_slot += 1
-            self._set_pd_metadata_for_current_slot(new_match=False)
+            self._set_phase_metadata(phase=self.PHASE_PD, new_match=False)
             observations = self._build_observations()
         else:
             if self._slot_index + 1 < len(self._slots):
                 self._slot_index += 1
                 self._pd_step_in_slot = 0
-                self._set_pd_metadata_for_current_slot(new_match=True)
+                self._set_phase_metadata(phase=self.PHASE_PD, new_match=True)
                 observations = self._build_observations()
             else:
-                self._finalize_episode()
-                observations = self._build_empty_observations()
+                partner_reward_sum = np.zeros((self.num_agents,), dtype=np.float32)
+                partner_reward_count = np.zeros((self.num_agents,), dtype=np.int32)
+                for match in self._matches:
+                    # For each agent j, track opponents' returns from matches where j participates.
+                    partner_reward_sum[match.selector] += np.float32(match.opponent_return)
+                    partner_reward_count[match.selector] += 1
+                    partner_reward_sum[match.opponent] += np.float32(match.selector_return)
+                    partner_reward_count[match.opponent] += 1
+
+                partner_episode_values = np.full((self.num_agents,), self.partner_reward_prior, dtype=np.float32)
+                valid = partner_reward_count > 0
+                partner_episode_values[valid] = (
+                    partner_reward_sum[valid] / partner_reward_count[valid].astype(np.float32)
+                )
+
+                alpha = np.float32(self.ema_alpha)
+                one_minus_alpha = np.float32(1.0) - alpha
+                self._ema_own_reward = one_minus_alpha * self._ema_own_reward + alpha * self._episode_returns
+                self._ema_partner_reward_when_present = (
+                    one_minus_alpha * self._ema_partner_reward_when_present + alpha * partner_episode_values
+                )
+
+                self._episode_done = True
+                self.is_terminated = True
+                self._phase = self.PHASE_MATCHING
+                self._can_act[:] = False
+                self._new_match[:] = False
+                self._active_opponents[:] = -1
+                observations = [
+                    {
+                        "selection_obs": np.zeros((self.num_agents - 1, 2), dtype=np.float32),
+                        "pd_obs": np.zeros((2,), dtype=np.float32),
+                    }
+                    for _ in range(self.num_agents)
+                ]
                 episode_done = True
 
         rewards = [np.float32(value) for value in rewards_array]
@@ -435,7 +349,7 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
         _ = options
 
         self._clear_episode_state()
-        self._set_matching_metadata()
+        self._set_phase_metadata(phase=self.PHASE_MATCHING)
 
         observations = self._build_observations()
         infos = self._build_infos()
@@ -445,12 +359,64 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
         if self._episode_done:
             raise RuntimeError("Episode already terminated. Call reset() before step().")
 
-        partners_abs, opening_signals, pd_actions = self._parse_actions(actions)
+        action_list = list(actions)
+        if len(action_list) != self.num_agents:
+            raise ValueError(f"Expected {self.num_agents} actions, got {len(action_list)}")
+
+        partners_abs = np.zeros((self.num_agents,), dtype=np.int32)
+        opening_signals = np.zeros((self.num_agents,), dtype=np.int8)
+        pd_actions = np.zeros((self.num_agents,), dtype=np.int8)
+
+        for agent_idx, action_entry in enumerate(action_list):
+            if isinstance(action_entry, dict):
+                if "partner" not in action_entry:
+                    raise ValueError(f"Action dict for agent {agent_idx} must contain 'partner': {action_entry}")
+                if "pd" not in action_entry:
+                    raise ValueError(f"Action dict for agent {agent_idx} must contain 'pd': {action_entry}")
+                partner_raw = action_entry["partner"]
+                pd_raw = action_entry["pd"]
+                opening_raw = action_entry.get("opening", 0)
+            elif isinstance(action_entry, (tuple, list, np.ndarray)):
+                if self.use_opening_signal:
+                    if len(action_entry) != 3:
+                        raise ValueError(
+                            f"Expected 3 action heads (partner, opening, pd) for agent {agent_idx}, got {action_entry}"
+                        )
+                    partner_raw, opening_raw, pd_raw = action_entry
+                else:
+                    if len(action_entry) != 2:
+                        raise ValueError(
+                            f"Expected 2 action heads (partner, pd) for agent {agent_idx}, got {action_entry}"
+                        )
+                    partner_raw, pd_raw = action_entry
+                    opening_raw = 0
+            else:
+                raise ValueError(
+                    f"Unsupported action format for agent {agent_idx}: {type(action_entry)}. "
+                    "Expected dict or tuple/list."
+                )
+
+            partner_rel = int(partner_raw)
+            if partner_rel < 0 or partner_rel >= self.num_agents - 1:
+                raise ValueError(
+                    f"Invalid relative partner id {partner_rel} for agent {agent_idx}, "
+                    f"expected [0, {self.num_agents - 2}]"
+                )
+
+            opening_signal = int(opening_raw)
+            pd_action = int(pd_raw)
+            if opening_signal not in (0, 1):
+                raise ValueError(f"Unsupported opening signal {opening_signal} for agent {agent_idx}, expected 0/1")
+            if pd_action not in (0, 1):
+                raise ValueError(f"Unsupported PD action {pd_action} for agent {agent_idx}, expected 0/1")
+
+            partners_abs[agent_idx] = partner_rel if partner_rel < agent_idx else partner_rel + 1
+            opening_signals[agent_idx] = np.int8(opening_signal)
+            pd_actions[agent_idx] = np.int8(pd_action)
 
         if self._phase == self.PHASE_MATCHING:
-            return self._step_matching_phase(partners_abs=partners_abs, opening_signals=opening_signals)
-
-        return self._step_pd_phase(pd_actions=pd_actions)
+            return self._step_selection_phase(partners_abs=partners_abs, opening_signals=opening_signals)
+        return self._step_game_phase(pd_actions=pd_actions)
 
     def render(self):
         frame = np.full((64, 64, 3), 24, dtype=np.uint8)
