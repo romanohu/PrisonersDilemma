@@ -8,8 +8,6 @@ current public API:
 
 `tankyu2026` の N 人集団化・selection/game phase 追加は、この package の外で
 `romanohu/envs/wrappers/population_match_phase.py` が担当します。
-`PopulationPrisonersDilemmaEnv` と `PairedPopulationPrisonersDilemmaEnv` は
-legacy compatibility module として repo 内に残っていますが、現在の推奨経路では使いません。
 
 ## Install
 
