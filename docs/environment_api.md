@@ -149,7 +149,6 @@ PairedPopulationPrisonersDilemmaEnv(
     num_agents=8,
     pd_horizon=32,
     ema_alpha=0.1,
-    use_opening_signal=False,
     own_reward_prior=0.0,
     partner_reward_prior=0.0,
     payoff_matrix=((3.0, 0.0), (4.0, 1.0)),
@@ -168,10 +167,7 @@ PairedPopulationPrisonersDilemmaEnv(
   - 未観測初期値 -> `[0,0]`
 
 - action space:
-  - `use_opening_signal=False`:
-    - `(partner_choice_rel, pd_action)`
-  - `use_opening_signal=True`:
-    - `(partner_choice_rel, opening_signal, pd_action)`
+  - `(partner_choice_rel, pd_action)`
 
 入力形式は `tuple/list/ndarray` または `dict` の両方を受け付ける。
 
@@ -186,7 +182,7 @@ PairedPopulationPrisonersDilemmaEnv(
 
 補足:
 - `i -> j` と `j -> i` は独立な別試合として扱う。
-- `opening_signal` は最初の `pd_obs` 初期化にのみ使い、報酬/統計に入れない。
+- 各ローカル試合の1step目 `pd_obs` は常に `[0,0]` で始まる。
 
 ### Phase Metadata (`infos[i]`)
 

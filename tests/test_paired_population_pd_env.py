@@ -6,11 +6,18 @@ from PrisonersDilemma.paired_population_prisoners_dilemma_env import PairedPopul
 
 
 class TestPairedPopulationPrisonersDilemmaEnv(unittest.TestCase):
+    def test_action_space_is_always_partner_and_pd(self):
+        env = PairedPopulationPrisonersDilemmaEnv(
+            num_agents=4,
+            pd_horizon=2,
+            seed=0,
+        )
+        self.assertEqual(len(env.action_space.spaces), 2)
+
     def test_matching_step_is_zero_reward_and_transitions_to_pd(self):
         env = PairedPopulationPrisonersDilemmaEnv(
             num_agents=3,
             pd_horizon=2,
-            use_opening_signal=False,
             seed=0,
         )
         obs, infos = env.reset()
@@ -36,27 +43,23 @@ class TestPairedPopulationPrisonersDilemmaEnv(unittest.TestCase):
         np.testing.assert_array_equal(obs_pd[1]["pd_obs"], np.array([0.0, 0.0], dtype=np.float32))
         np.testing.assert_array_equal(obs_pd[2]["pd_obs"], np.array([0.0, 0.0], dtype=np.float32))
 
-    def test_opening_signal_initializes_first_pd_observation_only(self):
+    def test_first_pd_observation_is_always_zero_initial_observation(self):
         env = PairedPopulationPrisonersDilemmaEnv(
             num_agents=2,
             pd_horizon=1,
-            use_opening_signal=True,
             seed=0,
         )
         env.reset()
 
-        # Both agents can only choose rel0 in N=2.
-        # agent0 opening=C(0), agent1 opening=D(1)
-        obs_pd, rewards_matching, _, _, infos_pd = env.step([(0, 0, 1), (0, 1, 1)])
+        obs_pd, rewards_matching, _, _, infos_pd = env.step([(0, 1), (0, 1)])
         np.testing.assert_array_equal(
             np.asarray(rewards_matching, dtype=np.float32), np.array([0.0, 0.0], dtype=np.float32)
         )
         self.assertEqual([int(info["selected_partner"]) for info in infos_pd], [1, 0])
-        np.testing.assert_array_equal(obs_pd[0]["pd_obs"], np.array([0.0, 1.0], dtype=np.float32))
-        np.testing.assert_array_equal(obs_pd[1]["pd_obs"], np.array([1.0, 0.0], dtype=np.float32))
+        np.testing.assert_array_equal(obs_pd[0]["pd_obs"], np.array([0.0, 0.0], dtype=np.float32))
+        np.testing.assert_array_equal(obs_pd[1]["pd_obs"], np.array([0.0, 0.0], dtype=np.float32))
 
-        # Rewards are determined only by PD actions, not by opening signals.
-        _, rewards_pd, terminations_pd, truncations_pd, _ = env.step([(0, 1, 0), (0, 0, 0)])
+        _, rewards_pd, terminations_pd, truncations_pd, _ = env.step([(0, 0), (0, 0)])
         np.testing.assert_array_equal(np.asarray(rewards_pd, dtype=np.float32), np.array([3.0, 3.0], dtype=np.float32))
         self.assertEqual(terminations_pd, [False, False])
         self.assertEqual(truncations_pd, [False, False])
@@ -65,7 +68,6 @@ class TestPairedPopulationPrisonersDilemmaEnv(unittest.TestCase):
         env = PairedPopulationPrisonersDilemmaEnv(
             num_agents=4,
             pd_horizon=1,
-            use_opening_signal=False,
             seed=0,
         )
         env.reset()
@@ -90,7 +92,6 @@ class TestPairedPopulationPrisonersDilemmaEnv(unittest.TestCase):
             ema_alpha=1.0,
             own_reward_prior=-1.0,
             partner_reward_prior=-2.0,
-            use_opening_signal=False,
             seed=0,
         )
         obs0, _ = env.reset()
@@ -116,7 +117,6 @@ class TestPairedPopulationPrisonersDilemmaEnv(unittest.TestCase):
         env = PairedPopulationPrisonersDilemmaEnv(
             num_agents=2,
             pd_horizon=1,
-            use_opening_signal=False,
             seed=0,
         )
         env.reset()

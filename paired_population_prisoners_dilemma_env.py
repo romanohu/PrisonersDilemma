@@ -30,7 +30,7 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
 
     Design invariants:
     - Non-participants are hard-masked by `can_act=False`.
-    - `opening_signal` only initializes first PD observation; it never affects rewards.
+    - The first PD observation in each local match is always the zero initial observation.
     - EMA population stats persist across `reset()` and are cleared only by
       `reset_population_stats()`.
     """
@@ -46,7 +46,6 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
         num_agents: int = 8,
         pd_horizon: int = 32,
         ema_alpha: float = 0.1,
-        use_opening_signal: bool = False,
         own_reward_prior: float = 0.0,
         partner_reward_prior: float = 0.0,
         payoff_matrix: Sequence[Sequence[float]] = ((3.0, 0.0), (4.0, 1.0)),
@@ -55,7 +54,6 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
         self.num_agents = int(num_agents)
         self.pd_horizon = int(pd_horizon)
         self.ema_alpha = float(ema_alpha)
-        self.use_opening_signal = bool(use_opening_signal)
         self.own_reward_prior = float(own_reward_prior)
         self.partner_reward_prior = float(partner_reward_prior)
 
@@ -69,21 +67,12 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
         self.core = PairwisePrisonersDilemmaCore(payoff_matrix=payoff_matrix)
         self._rng = np.random.default_rng(int(seed))
 
-        if self.use_opening_signal:
-            self.action_space = spaces.Tuple(
-                (
-                    spaces.Discrete(self.num_agents - 1),  # partner choice (relative id)
-                    spaces.Discrete(2),  # opening signal (C/D)
-                    spaces.Discrete(2),  # PD action (C/D)
-                )
+        self.action_space = spaces.Tuple(
+            (
+                spaces.Discrete(self.num_agents - 1),  # partner choice (relative id)
+                spaces.Discrete(2),  # PD action (C/D)
             )
-        else:
-            self.action_space = spaces.Tuple(
-                (
-                    spaces.Discrete(self.num_agents - 1),  # partner choice (relative id)
-                    spaces.Discrete(2),  # PD action (C/D)
-                )
-            )
+        )
 
         self.observation_space = spaces.Dict(
             {
@@ -129,7 +118,6 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
 
         self._episode_returns = np.zeros((self.num_agents,), dtype=np.float32)
         self._selected_partners = np.full((self.num_agents,), -1, dtype=np.int32)
-        self._opening_signals = np.zeros((self.num_agents,), dtype=np.int8)
 
         self._matches: list[_DirectedMatchState] = []
         self._slots: list[list[int]] = []
@@ -198,11 +186,7 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
             selector_idx = match.selector
             opponent_idx = match.opponent
 
-            if self._pd_step_in_slot == 0:
-                if self.use_opening_signal:
-                    observations[selector_idx]["pd_obs"] = self._encode_pd_action(int(self._opening_signals[opponent_idx]))
-                    observations[opponent_idx]["pd_obs"] = self._encode_pd_action(int(self._opening_signals[selector_idx]))
-            else:
+            if self._pd_step_in_slot > 0:
                 observations[selector_idx]["pd_obs"] = self._encode_pd_action(match.last_opponent_action)
                 observations[opponent_idx]["pd_obs"] = self._encode_pd_action(match.last_selector_action)
 
@@ -223,12 +207,8 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
             )
         return infos
 
-    def _step_selection_phase(self, *, partners_abs: np.ndarray, opening_signals: np.ndarray):
+    def _step_selection_phase(self, *, partners_abs: np.ndarray):
         self._selected_partners = partners_abs.copy()
-        if self.use_opening_signal:
-            self._opening_signals = opening_signals.copy()
-        else:
-            self._opening_signals[:] = 0
 
         self._matches = [
             _DirectedMatchState(selector=selector_idx, opponent=int(self._selected_partners[selector_idx]))
@@ -364,7 +344,6 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
             raise ValueError(f"Expected {self.num_agents} actions, got {len(action_list)}")
 
         partners_abs = np.zeros((self.num_agents,), dtype=np.int32)
-        opening_signals = np.zeros((self.num_agents,), dtype=np.int8)
         pd_actions = np.zeros((self.num_agents,), dtype=np.int8)
 
         for agent_idx, action_entry in enumerate(action_list):
@@ -373,23 +352,18 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
                     raise ValueError(f"Action dict for agent {agent_idx} must contain 'partner': {action_entry}")
                 if "pd" not in action_entry:
                     raise ValueError(f"Action dict for agent {agent_idx} must contain 'pd': {action_entry}")
+                if "opening" in action_entry:
+                    raise ValueError(
+                        f"Action dict for agent {agent_idx} contains unsupported key 'opening': {action_entry}"
+                    )
                 partner_raw = action_entry["partner"]
                 pd_raw = action_entry["pd"]
-                opening_raw = action_entry.get("opening", 0)
             elif isinstance(action_entry, (tuple, list, np.ndarray)):
-                if self.use_opening_signal:
-                    if len(action_entry) != 3:
-                        raise ValueError(
-                            f"Expected 3 action heads (partner, opening, pd) for agent {agent_idx}, got {action_entry}"
-                        )
-                    partner_raw, opening_raw, pd_raw = action_entry
-                else:
-                    if len(action_entry) != 2:
-                        raise ValueError(
-                            f"Expected 2 action heads (partner, pd) for agent {agent_idx}, got {action_entry}"
-                        )
-                    partner_raw, pd_raw = action_entry
-                    opening_raw = 0
+                if len(action_entry) != 2:
+                    raise ValueError(
+                        f"Expected 2 action heads (partner, pd) for agent {agent_idx}, got {action_entry}"
+                    )
+                partner_raw, pd_raw = action_entry
             else:
                 raise ValueError(
                     f"Unsupported action format for agent {agent_idx}: {type(action_entry)}. "
@@ -403,19 +377,15 @@ class PairedPopulationPrisonersDilemmaEnv(gym.Env):
                     f"expected [0, {self.num_agents - 2}]"
                 )
 
-            opening_signal = int(opening_raw)
             pd_action = int(pd_raw)
-            if opening_signal not in (0, 1):
-                raise ValueError(f"Unsupported opening signal {opening_signal} for agent {agent_idx}, expected 0/1")
             if pd_action not in (0, 1):
                 raise ValueError(f"Unsupported PD action {pd_action} for agent {agent_idx}, expected 0/1")
 
             partners_abs[agent_idx] = partner_rel if partner_rel < agent_idx else partner_rel + 1
-            opening_signals[agent_idx] = np.int8(opening_signal)
             pd_actions[agent_idx] = np.int8(pd_action)
 
         if self._phase == self.PHASE_MATCHING:
-            return self._step_selection_phase(partners_abs=partners_abs, opening_signals=opening_signals)
+            return self._step_selection_phase(partners_abs=partners_abs)
         return self._step_game_phase(pd_actions=pd_actions)
 
     def render(self):

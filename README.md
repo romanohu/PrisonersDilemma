@@ -51,7 +51,6 @@ from PrisonersDilemma import PairedPopulationPrisonersDilemmaEnv
 env = PairedPopulationPrisonersDilemmaEnv(
     num_agents=8,
     pd_horizon=32,
-    use_opening_signal=False,
 )
 
 obs, infos = env.reset(seed=7)

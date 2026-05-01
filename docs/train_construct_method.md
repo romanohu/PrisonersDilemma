@@ -22,10 +22,7 @@
 
 ## 3. action の扱い
 
-- `use_opening_signal=False`:
-  - 各agent actionは `(partner_choice_rel, pd_action)`
-- `use_opening_signal=True`:
-  - 各agent actionは `(partner_choice_rel, opening_signal, pd_action)`
+- 各agent actionは常に `(partner_choice_rel, pd_action)`
 
 補足:
 - `partner_choice_rel` は相対ID（`Discrete(N-1)`）。
@@ -80,13 +77,11 @@
 - 同一slot内で同一agentが重複しないようにpackされる。
 - したがって、1step内で複数試合を同時処理しても、各agentはそのstepで高々1回だけ行動する。
 
-## 8. opening_signal の運用注意
+## 8. 各ローカル試合の初期 `pd_obs`
 
-- `use_opening_signal=True` のときのみ有効。
-- `opening_signal` はPD行動とは別レーンで管理される。
-- 用途は「各ローカル試合の**1step目の `pd_obs` 初期化のみ**」。
-- 報酬、PD統計、EMA更新には一切含めない。
-- `use_opening_signal=False` では初期 `pd_obs=[0,0]`。
+- 各ローカル試合の1step目 `pd_obs` は常に `[0,0]`。
+- 1step目には直前行動の履歴は存在しないため、環境側で固定初期観測を返す。
+- 報酬、PD統計、EMA更新に追加の side channel は使わない。
 
 ## 9. EMA統計の意味と更新
 
