@@ -1,11 +1,18 @@
 # Environment API and Transition Semantics
 
-このドキュメントは、現在リポジトリで公開している以下の環境APIをまとめたものです。
+このドキュメントは、current public API と legacy compatibility 環境の両方をまとめたものです。
+
+current public API:
 
 - `PairwisePrisonersDilemmaCore`
 - `PrisonersDilemmaEnv`（2-agent）
+
+legacy compatibility:
+
 - `PopulationPrisonersDilemmaEnv`
 - `PairedPopulationPrisonersDilemmaEnv`
+
+現在の `tankyu2026` は、2人 base game `PrisonersDilemmaEnv` を `romanohu` 側 wrapper から呼び出します。
 
 ## 1. Shared Conventions
 

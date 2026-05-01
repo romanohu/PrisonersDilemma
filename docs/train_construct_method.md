@@ -1,7 +1,8 @@
-# N-Agent Pair PD: 外部ラッパー運用メモ
+# N-Agent Pair PD: legacy note
 
-このドキュメントは、`PairedPopulationPrisonersDilemmaEnv` を**外部ラッパー経由で学習に接続する際の注意点**をまとめたものです。  
-環境本体はフレームワーク非依存で、学習基盤固有の制御はラッパー側で行います。
+このドキュメントは legacy compatibility 向けのメモです。  
+現在の推奨構成では、環境本体は 2人 base game `PrisonersDilemmaEnv` に固定し、
+N 人集団化 / selection phase / phase-aware observation は `romanohu` 側 wrapper が担当します。
 
 ## 1. 設計方針の分離
 
